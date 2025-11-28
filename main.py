@@ -15,6 +15,17 @@ from sklearn.ensemble import RandomForestClassifier
 # Tenta pegar a chave do ambiente (GitHub Actions), senão usa a string direta
 # IMPORTANTE: Se fores rodar no PC, substitua "SUA_API_KEY_AQUI" pela tua chave real.
 API_KEY = os.environ.get("FOOTBALL_API_KEY", "SUA_API_KEY_AQUI") 
+
+# --- VERIFICAÇÃO DE SEGURANÇA (NOVO) ---
+if API_KEY == "SUA_API_KEY_AQUI":
+    print("\n" + "="*60)
+    print("❌ ERRO: API KEY NÃO CONFIGURADA!")
+    print("   Você precisa substituir 'SUA_API_KEY_AQUI' na linha 16")
+    print("   pela sua chave verdadeira da API-Sports.")
+    print("="*60 + "\n")
+    exit() # Para o código aqui para você não perder tempo rodando sem chave
+# ---------------------------------------
+
 LEAGUE_ID = "71"  # Brasileirão Série A
 
 # Pega o ano atual do sistema automaticamente
