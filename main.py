@@ -26,7 +26,7 @@ LEAGUES = {
     '140': 'La Liga (ESP)'
 }
 
-# Times para o Modo Offline (Para gerar dados bonitos quando a API falhar)
+# Times para o Modo Offline
 MOCK_TEAMS = {
     '71': ['Flamengo', 'Palmeiras', 'São Paulo', 'Corinthians', 'Vasco', 'Fluminense', 'Botafogo', 'Grêmio', 'Inter', 'Atlético-MG', 'Cruzeiro', 'Bahia', 'Fortaleza', 'Athletico-PR', 'Santos', 'Goiás', 'Coritiba', 'América-MG', 'Cuiabá', 'Red Bull Bragantino'],
     '39': ['Man City', 'Liverpool', 'Arsenal', 'Man Utd', 'Chelsea', 'Tottenham', 'Newcastle', 'Aston Villa', 'Brighton', 'West Ham', 'Crystal Palace', 'Wolves', 'Everton', 'Fulham', 'Brentford', 'Nottingham', 'Bournemouth', 'Luton', 'Burnley', 'Sheffield'],
@@ -34,7 +34,7 @@ MOCK_TEAMS = {
     '2': ['Real Madrid', 'Man City', 'Bayern', 'PSG', 'Inter Milan', 'Barcelona', 'Arsenal', 'Dortmund', 'Atlético Madrid', 'Porto', 'Benfica', 'Napoli', 'Milan', 'RB Leipzig', 'PSV', 'Feyenoord'],
 }
 
-print(f"⚙️ MODO HÍBRIDO: Tentando API... (Fallback para Gerador Offline se falhar)")
+print(f"⚙️ MODO HÍBRIDO: Atualizando com Escudos...")
 
 # -------------------------------------------------------------------------
 # CONEXÃO FIREBASE
@@ -61,43 +61,32 @@ if firebase_admin._apps:
 # GERADOR DE DADOS (MODO OFFLINE)
 # -------------------------------------------------------------------------
 def gerar_campeonato_falso(league_id):
-    """
-    Gera uma temporada inteira com resultados aleatórios realistas
-    para quando a API estiver indisponível.
-    """
     print(f"      🎲 Gerando dados fictícios para Liga {league_id}...")
-    teams = MOCK_TEAMS.get(league_id, MOCK_TEAMS['71']) # Usa times BR como padrão se não achar
-    
-    # Embaralha para variar quem é campeão a cada execução
+    teams = MOCK_TEAMS.get(league_id, MOCK_TEAMS['71'])
     random.shuffle(teams)
     
     jogos = []
     game_counter = 0
-    
-    # Gera 38 rodadas (todos contra todos ida e volta simplificado)
-    # Para simplificar, faremos um round-robin simples
     num_teams = len(teams)
     total_rounds = (num_teams - 1) * 2
-    
     data_base = datetime.datetime.now() - datetime.timedelta(days=200)
     
+    # Placeholder de escudo para modo offline
+    DEFAULT_LOGO = "https://media.api-sports.io/football/teams/default.png"
+
     for rodada in range(1, total_rounds + 1):
-        # Lógica simples de pareamento (apenas para ter jogos)
         random.shuffle(teams)
         metade = num_teams // 2
         
         for i in range(metade):
             home_team = teams[i]
             away_team = teams[i + metade]
-            
-            # Gera placar baseado em "força" aleatória (simulada)
             gols_h = int(np.random.poisson(1.5))
             gols_a = int(np.random.poisson(1.0))
             
             status = 'FT'
             result = 1 if gols_h > gols_a else (2 if gols_a > gols_h else 0)
             
-            # Se for uma das últimas rodadas, deixamos como "Futuro" (NS) para previsão
             if rodada >= 35:
                 status = 'NS'
                 gols_h = None
@@ -113,6 +102,8 @@ def gerar_campeonato_falso(league_id):
                 'date': data_jogo,
                 'home_team': home_team,
                 'away_team': away_team,
+                'home_logo': DEFAULT_LOGO, # Adicionado
+                'away_logo': DEFAULT_LOGO, # Adicionado
                 'home_goals': gols_h,
                 'away_goals': gols_a,
                 'result': result,
@@ -141,7 +132,6 @@ def converter_rodada_para_numero(texto_rodada):
 def coletar_campeonato(league_id, league_name):
     print(f"   -> Baixando {league_name} (ID {league_id})...")
     
-    # --- TENTATIVA API ---
     usar_mock = False
     if API_KEY == "SUA_API_KEY_AQUI" or not API_KEY:
         print("      ⚠️ Sem API Key configurada. Usando Modo Offline.")
@@ -162,7 +152,6 @@ def coletar_campeonato(league_id, league_name):
                 print(f"      ⚠️ API retornou 0 jogos. -> Ativando Modo Offline.")
                 usar_mock = True
             else:
-                # Processamento API Real
                 jogos = []
                 for item in data['response']:
                     rodada_str = item['league']['round']
@@ -170,6 +159,12 @@ def coletar_campeonato(league_id, league_name):
                     home = item['goals']['home']
                     away = item['goals']['away']
                     status = item['fixture']['status']['short']
+                    
+                    # --- CAPTURA DOS LOGOS ---
+                    home_logo = item['teams']['home']['logo']
+                    away_logo = item['teams']['away']['logo']
+                    # -------------------------
+
                     result = None
                     if status == 'FT' and home is not None and away is not None:
                         result = 1 if home > away else (2 if away > home else 0)
@@ -180,6 +175,8 @@ def coletar_campeonato(league_id, league_name):
                         'date': item['fixture']['date'],
                         'home_team': item['teams']['home']['name'],
                         'away_team': item['teams']['away']['name'],
+                        'home_logo': home_logo, # Salva URL
+                        'away_logo': away_logo, # Salva URL
                         'home_goals': home,
                         'away_goals': away,
                         'result': result,
@@ -201,7 +198,6 @@ def coletar_campeonato(league_id, league_name):
             print(f"      ❌ Erro de Conexão: {e} -> Ativando Modo Offline.")
             usar_mock = True
 
-    # --- FALLBACK MOCK ---
     if usar_mock:
         return gerar_campeonato_falso(league_id)
     
@@ -238,7 +234,6 @@ def engenharia_de_features(df):
         features_list.append(features)
 
         if row['result'] is not None:
-            # Garante que goals não é None (pode acontecer no mock)
             gh = row['home_goals'] if row['home_goals'] is not None else 0
             ga = row['away_goals'] if row['away_goals'] is not None else 0
             
@@ -246,7 +241,6 @@ def engenharia_de_features(df):
             stats[h]['goals_scored'] += gh; stats[h]['goals_conceded'] += ga
             stats[a]['goals_scored'] += ga; stats[a]['goals_conceded'] += gh
             
-            # Calcula pontos com base no resultado (ou simula se for None mas FT)
             if row['result'] is not None:
                 res = row['result']
             else:
@@ -278,7 +272,6 @@ def rodar_robo_multi_liga():
         
         df_enriched = engenharia_de_features(df)
         
-        # Treina IA
         df_treino = df_enriched.dropna(subset=['result'])
         model = None
         if len(df_treino) > 10:
@@ -314,7 +307,6 @@ def rodar_robo_multi_liga():
             
             doc_ref = db.collection('games').document(row['id'])
             
-            # Se for jogo futuro (mock ou real), status é NS
             status_final = row['status']
             score_h = int(row['home_goals']) if pd.notna(row['home_goals']) else None
             score_a = int(row['away_goals']) if pd.notna(row['away_goals']) else None
@@ -326,6 +318,10 @@ def rodar_robo_multi_liga():
                 'round': int(row['round']),
                 'roundLabel': str(row['round_label']),
                 'homeTeam': row['home_team'], 'awayTeam': row['away_team'],
+                # NOVOS CAMPOS DE LOGO
+                'homeLogo': row['home_logo'],
+                'awayLogo': row['away_logo'],
+                # --------------------
                 'homeScore': score_h,
                 'awayScore': score_a,
                 'date': date_fmt,
