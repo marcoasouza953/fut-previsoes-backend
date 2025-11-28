@@ -12,36 +12,41 @@ from sklearn.ensemble import RandomForestClassifier
 # -------------------------------------------------------------------------
 # CONFIGURAÇÕES
 # -------------------------------------------------------------------------
+# Tenta pegar a chave do ambiente (GitHub Actions), senão usa a string direta
 API_KEY = os.environ.get("FOOTBALL_API_KEY", "SUA_API_KEY_AQUI") 
+
 LEAGUE_ID = "71"  # Brasileirão Série A
-SEASON_TRAIN = "2023"
-SEASON_CURRENT = "2024"
+SEASON_TRAIN = "2023" # Ano para treinar a IA
+SEASON_CURRENT = "2024" # Ano atual para buscar jogos reais
 
 # -------------------------------------------------------------------------
 # CONEXÃO COM O FIREBASE
 # -------------------------------------------------------------------------
 print("1. Conectando ao Firebase...")
 if not firebase_admin._apps:
+    # 1. Tenta pegar do Segredo do GitHub (Variável de Ambiente)
     firebase_creds_str = os.environ.get("FIREBASE_CREDENTIALS")
+    
     if firebase_creds_str:
+        print("☁️ Usando credenciais da Nuvem (GitHub Secret)")
         cred = credentials.Certificate(json.loads(firebase_creds_str))
+        firebase_admin.initialize_app(cred)
     else:
-        # Fallback local
+        # 2. Fallback: Tenta pegar arquivo local (para rodar no PC/Colab)
         local_key_path = "firebase_key.json" 
         if os.path.exists(local_key_path):
+            print("💻 Usando arquivo local")
             cred = credentials.Certificate(local_key_path)
+            firebase_admin.initialize_app(cred)
         else:
-            # Cria um app dummy para evitar erro se não tiver chave (apenas para teste de sintaxe)
-            print("⚠️ AVISO: Sem credenciais. O código vai falhar ao tentar salvar.")
-            pass # Em produção, isso deve falhar.
+            print("⚠️ AVISO: Sem credenciais encontradas. O salvamento vai falhar.")
 
-    if firebase_admin._apps or 'cred' in locals():
-         if not firebase_admin._apps: firebase_admin.initialize_app(cred)
-         db = firestore.client()
-         print("✅ Conectado ao banco de dados!")
+if firebase_admin._apps:
+    db = firestore.client()
+    print("✅ Conectado ao banco de dados!")
 
 # -------------------------------------------------------------------------
-# LÓGICA AVANÇADA DE IA
+# LÓGICA DE INTELIGÊNCIA ARTIFICIAL
 # -------------------------------------------------------------------------
 
 def coletar_dados_da_temporada(season):
@@ -56,7 +61,7 @@ def coletar_dados_da_temporada(season):
     jogos = []
     if 'response' in data:
         for item in data['response']:
-            # Pega jogos finalizados (FT)
+            # Apenas jogos terminados contam para estatística
             if item['fixture']['status']['short'] == 'FT':
                 home = item['goals']['home']
                 away = item['goals']['away']
@@ -68,8 +73,7 @@ def coletar_dados_da_temporada(season):
                     'away_team': item['teams']['away']['name'],
                     'home_goals': home,
                     'away_goals': away,
-                    'result': result,
-                    'is_future': False
+                    'result': result
                 })
     
     df = pd.DataFrame(jogos)
@@ -80,59 +84,50 @@ def coletar_dados_da_temporada(season):
 
 def engenharia_de_features(df):
     """
-    O SEGREDO DA IA: Aqui transformamos placares simples em estatísticas poderosas.
-    Calculamos tudo jogo a jogo para simular o conhecimento que tínhamos NAQUELA data.
+    Calcula estatísticas avançadas (Ataque, Defesa, Forma) jogo a jogo.
     """
-    stats = {} # { 'Palmeiras': {'points': 45, 'games': 20, 'goals_scored': 30, 'goals_conceded': 15, 'last_5': [3, 1, 0, 3, 3]} }
-    
-    # Inicializa stats para todos os times
+    stats = {}
     all_teams = set(df['home_team']).union(set(df['away_team']))
+    
+    # Inicializa estatísticas zeradas
     for team in all_teams:
         stats[team] = {
             'points': 0, 'games': 0, 
             'goals_scored': 0, 'goals_conceded': 0,
-            'last_5': [] # Lista para guardar pontos dos últimos 5 jogos (3, 1 ou 0)
+            'last_5': []
         }
 
-    # Listas para guardar as features calculadas
     features_list = []
 
     for index, row in df.iterrows():
         h = row['home_team']
         a = row['away_team']
         
-        # 1. EXTRAI AS FEATURES (O estado dos times ANTES do jogo começar)
-        
-        # Função auxiliar para calcular média segura (evitar divisão por zero)
+        # Funções auxiliares para calcular médias no momento do jogo
         def get_avg(team, metric):
             if stats[team]['games'] == 0: return 0
             return stats[team][metric] / stats[team]['games']
 
-        # Função auxiliar para calcular forma (soma dos últimos 5 jogos)
         def get_form(team):
             return sum(stats[team]['last_5'])
 
-        # Monta a linha de dados para a IA
+        # Cria as 'features' (dados que a IA usa para aprender)
         features = {
             'home_points': stats[h]['points'],
             'away_points': stats[a]['points'],
             'points_diff': stats[h]['points'] - stats[a]['points'],
             
-            # --- NOVAS FEATURES AVANÇADAS ---
-            'home_form': get_form(h),          # Quão quente está o mandante?
-            'away_form': get_form(a),          # Quão quente está o visitante?
-            'form_diff': get_form(h) - get_form(a),
-            
-            'home_attack': get_avg(h, 'goals_scored'),      # Poder de fogo média
-            'away_defense': get_avg(a, 'goals_conceded'),   # Fragilidade defensiva média
+            # --- ESTATÍSTICAS PARA O APP ---
+            'home_form': get_form(h),
+            'away_form': get_form(a),
+            'home_attack': get_avg(h, 'goals_scored'),      # Média de gols feitos
+            'away_defense': get_avg(a, 'goals_conceded'),   # Média de gols sofridos
             'away_attack': get_avg(a, 'goals_scored'),
             'home_defense': get_avg(h, 'goals_conceded'),
         }
         features_list.append(features)
 
-        # 2. ATUALIZA AS ESTATÍSTICAS (Com o resultado real deste jogo, para o próximo loop)
-        
-        # Atualiza contadores básicos
+        # Atualiza os acumuladores com o resultado deste jogo
         stats[h]['games'] += 1
         stats[a]['games'] += 1
         stats[h]['goals_scored'] += row['home_goals']
@@ -140,61 +135,55 @@ def engenharia_de_features(df):
         stats[a]['goals_scored'] += row['away_goals']
         stats[a]['goals_conceded'] += row['home_goals']
         
-        # Pontos da partida
         pts_h, pts_a = 0, 0
         if row['result'] == 1: pts_h = 3
         elif row['result'] == 2: pts_a = 3
-        else:
-            pts_h, pts_a = 1, 1
+        else: pts_h, pts_a = 1, 1
             
         stats[h]['points'] += pts_h
         stats[a]['points'] += pts_a
         
-        # Atualiza a fila dos últimos 5 jogos (Remove o mais antigo se já tiver 5)
+        # Mantém apenas os últimos 5 jogos na lista de forma
         stats[h]['last_5'].append(pts_h)
         if len(stats[h]['last_5']) > 5: stats[h]['last_5'].pop(0)
-        
         stats[a]['last_5'].append(pts_a)
         if len(stats[a]['last_5']) > 5: stats[a]['last_5'].pop(0)
 
-    # Anexa as features calculadas ao DataFrame original
+    # Junta tudo num DataFrame final
     features_df = pd.DataFrame(features_list)
     df_final = pd.concat([df.reset_index(drop=True), features_df], axis=1)
     
     return df_final, stats
 
-def treinar_e_prever():
-    # 1. PREPARAÇÃO (TREINO)
+def rodar_robo():
+    # 1. TREINAMENTO
     print("\n2. Preparando IA com dados de 2023...")
     df_train = coletar_dados_da_temporada(SEASON_TRAIN)
     if df_train.empty:
-        print("❌ Erro: Não foi possível baixar dados de treino.")
+        print("❌ Erro: Sem dados de treino.")
         return
 
-    # Aplica a engenharia de features nos dados de treino
+    # Enriquece os dados de treino com as estatísticas
     df_train_enriched, _ = engenharia_de_features(df_train)
     
-    # Define quais colunas a IA vai olhar
+    # Define o que a IA deve olhar
     FEATURE_COLS = ['points_diff', 'home_form', 'away_form', 'home_attack', 'away_defense', 'away_attack', 'home_defense']
-    
     X = df_train_enriched[FEATURE_COLS]
     y = df_train_enriched['result']
     
-    # Treina o modelo (Aumentei n_estimators para 100 para mais precisão)
-    print("3. Treinando Random Forest com estatísticas avançadas...")
+    print("3. Treinando Modelo (Random Forest)...")
     model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
     model.fit(X, y)
     
-    # 2. PREPARAÇÃO (JOGOS REAIS/ATUAIS)
-    print(f"\n4. Buscando contexto da temporada atual ({SEASON_CURRENT})...")
+    # 2. CONTEXTO ATUAL
+    print(f"\n4. Calculando força atual dos times ({SEASON_CURRENT})...")
     df_current = coletar_dados_da_temporada(SEASON_CURRENT)
     
-    # Precisamos rodar a engenharia na temporada atual inteira para ter o estado ATUAL dos times (stats)
-    # Mesmo que o df_current esteja vazio (início de temporada), o código trata.
     if not df_current.empty:
+        # Se já começou a temporada 2024, calculamos as stats atuais
         _, current_stats = engenharia_de_features(df_current)
     else:
-        # Se não tiver jogos em 2024, usamos simulação ou stats zerados
+        # Se não, usamos stats vazias ou do final de 2023
         current_stats = {t: {'points':0, 'games':0, 'goals_scored':0, 'goals_conceded':0, 'last_5':[]} for t in set(df_train['home_team'])}
 
     # 3. BUSCA JOGOS FUTUROS
@@ -210,13 +199,11 @@ def treinar_e_prever():
     
     if data_next['results'] > 0:
         jogos_futuros = data_next['response']
-        print(f"✅ {len(jogos_futuros)} jogos encontrados.")
+        print(f"✅ {len(jogos_futuros)} jogos reais encontrados.")
     else:
         print("⚠️ Sem jogos agendados. Usando SIMULAÇÃO (últimos do treino).")
-        # Simula com os últimos 5 do treino para não deixar o app vazio
         last_games = df_train.tail(5).to_dict('records')
         for lg in last_games:
-            # Estrutura fake para simular a resposta da API
             jogos_futuros.append({
                 'fixture': {'id': f"sim_{lg['date']}", 'date': str(lg['date']), 'venue': {'name': 'Simulação'}, 'status': {'short': 'NS'}},
                 'teams': {'home': {'name': lg['home_team']}, 'away': {'name': lg['away_team']}},
@@ -224,11 +211,15 @@ def treinar_e_prever():
             })
 
     # 4. PREVISÃO E SALVAMENTO
+    if not firebase_admin._apps:
+        print("❌ Sem conexão com Firebase. Pulando salvamento.")
+        return
+
     batch = db.batch()
-    print("6. Calculando probabilidades e salvando...")
+    print("6. Calculando probabilidades e salvando no Firebase...")
     
+    # Função auxiliar para pegar stat de forma segura
     def safe_get_stat(team, metric, default=0):
-        # Auxiliar para pegar stat do time atual, ou 0 se time novo
         if team not in current_stats: return default
         s = current_stats[team]
         if metric == 'form': return sum(s['last_5'])
@@ -239,20 +230,18 @@ def treinar_e_prever():
         home = item['teams']['home']['name']
         away = item['teams']['away']['name']
         
-        # Constrói as features para o jogo futuro usando o current_stats
+        # Pega as stats atuais dos times
         h_form = safe_get_stat(home, 'form')
         a_form = safe_get_stat(away, 'form')
         h_att = safe_get_stat(home, 'goals_scored')
-        a_def = safe_get_stat(away, 'goals_conceded')
-        a_att = safe_get_stat(away, 'goals_scored')
         h_def = safe_get_stat(home, 'goals_conceded')
+        a_att = safe_get_stat(away, 'goals_scored')
+        a_def = safe_get_stat(away, 'goals_conceded')
         
-        # Pontos totais para diff
         h_pts = current_stats.get(home, {}).get('points', 0)
         a_pts = current_stats.get(away, {}).get('points', 0)
         
-        # O vetor X deve ter a mesma ordem do treino:
-        # ['points_diff', 'home_form', 'away_form', 'home_attack', 'away_defense', 'away_attack', 'home_defense']
+        # Monta a linha para a IA prever
         features_jogo = [[
             h_pts - a_pts,
             h_form, a_form,
@@ -260,49 +249,51 @@ def treinar_e_prever():
             a_att, h_def
         ]]
         
-        # Previsão
+        # A IA dá a probabilidade
         probs = model.predict_proba(features_jogo)[0]
         
-        # Formata forma para exibir no App (ex: "VVDDE")
-        # Como temos apenas os pontos (3,1,0), vamos converter toscamente para string
-        def points_to_str(pts_list):
-            mapa = {3:'V', 1:'E', 0:'D'}
-            return "".join([mapa.get(p, '-') for p in pts_list])
+        # Gera o Insight de texto
+        insight = "Duelo equilibrado."
+        if probs[1] > 0.6: insight = f"{home} favorito! Ataque potente ({h_att:.1f} gols/jogo)."
+        elif probs[2] > 0.6: insight = f"{away} pode surpreender, defesa adversária frágil."
+        elif h_form > a_form + 5: insight = f"{home} vem numa sequência muito melhor."
         
-        h_form_str = points_to_str(current_stats.get(home, {}).get('last_5', []))
-        a_form_str = points_to_str(current_stats.get(away, {}).get('last_5', []))
-        
-        # Cria insight textual
-        insight = "Jogo equilibrado."
-        if probs[1] > 0.6: insight = f"{home} é favorito com ataque forte ({h_att:.1f} gols/jogo)."
-        elif probs[2] > 0.6: insight = f"{away} tem grande chance, aproveitando má defesa do rival."
-        elif abs(h_form - a_form) > 5: insight = f"Momento decisivo: {home if h_form > a_form else away} vem em fase muito melhor."
-        
-        # Salva
+        # Prepara objeto para o App
         game_id = str(item['fixture']['id'])
         doc_ref = db.collection('games').document(game_id)
         
-        # Data
-        date_str = item['fixture']['date']
-        ts = 0
+        # Tratamento de data
+        ts = int(datetime.datetime.now().timestamp() * 1000)
         try:
-            dt = pd.to_datetime(date_str)
+            dt = pd.to_datetime(item['fixture']['date'])
             date_fmt = dt.strftime("%d/%m %H:%M")
             ts = int(dt.timestamp() * 1000)
         except:
-            date_fmt = "Data a confirmar"
+            date_fmt = "Data a definir"
+
+        # Converte forma para string "VVDDE"
+        def points_to_str(pts):
+            mapa = {3:'V', 1:'E', 0:'D'}
+            return "".join([mapa.get(p, '-') for p in pts])
 
         dados = {
             'id': game_id,
             'homeTeam': home, 'awayTeam': away,
             'date': date_fmt,
             'venue': item['fixture']['venue']['name'] or "Estádio",
-            'homeForm': h_form_str or "-----",
-            'awayForm': a_form_str or "-----",
+            'homeForm': points_to_str(current_stats.get(home, {}).get('last_5', [])),
+            'awayForm': points_to_str(current_stats.get(away, {}).get('last_5', [])),
             'probs': {
                 'home': int(probs[1] * 100),
                 'draw': int(probs[0] * 100),
                 'away': int(probs[2] * 100)
+            },
+            # --- ESTATÍSTICAS NOVAS (O que faltava) ---
+            'stats': {
+                'homeAttack': float(f"{h_att:.2f}"),
+                'homeDefense': float(f"{h_def:.2f}"),
+                'awayAttack': float(f"{a_att:.2f}"),
+                'awayDefense': float(f"{a_def:.2f}")
             },
             'insight': insight,
             'timestamp': ts
@@ -310,10 +301,7 @@ def treinar_e_prever():
         batch.set(doc_ref, dados)
 
     batch.commit()
-    print("✅ Previsões AVANÇADAS enviadas com sucesso!")
+    print("✅ SUCESSO! Dados atualizados no Firebase.")
 
 if __name__ == "__main__":
-    if 'db' in globals() or firebase_admin._apps:
-        treinar_e_prever()
-    else:
-        print("❌ Erro de conexão com Firebase. Verifique as chaves.")
+    rodar_robo()
