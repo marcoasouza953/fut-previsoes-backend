@@ -19,8 +19,8 @@ LEAGUE_ID = "71"  # Brasileirão
 
 hoje = datetime.datetime.now()
 ANO_ATUAL = hoje.year
-SEASON_CURRENT = str(ANO_ATUAL)
-SEASON_TRAIN_HISTORIC = str(ANO_ATUAL - 1)
+SEASON_CURRENT = str(ANO_ATUAL)       # Vai ser "2024"
+SEASON_TRAIN_HISTORIC = str(ANO_ATUAL - 1) # Vai ser "2023"
 
 print(f"⚙️ Robô Iniciado: {hoje.strftime('%d/%m/%Y')} | Temporada: {SEASON_CURRENT}")
 
