@@ -13,10 +13,12 @@ from sklearn.ensemble import RandomForestClassifier
 # -------------------------------------------------------------------------
 # 1. CONFIGURAÇÕES
 # -------------------------------------------------------------------------
+# IMPORTANTE: Verifique se sua chave está aqui!
 API_KEY = os.environ.get("FOOTBALL_API_KEY", "SUA_API_KEY_AQUI") 
 
-# Lista de Campeonatos (ID da API-Football)
-# Você pode adicionar mais aqui!
+# Se quiser testar outro ano, mude aqui (ex: "2024" ou "2025")
+SEASON_TARGET = "2023" 
+
 LEAGUES = {
     '71': 'Brasileirão Série A',
     '13': 'Copa Libertadores',
@@ -26,10 +28,8 @@ LEAGUES = {
     '140': 'La Liga (ESP)'
 }
 
-# Vamos focar na temporada passada/atual completa para ter dados
-SEASON_TARGET = "2023" 
-
-print(f"⚙️ MODO MULTI-LIGA: Processando {len(LEAGUES)} campeonatos...")
+print(f"⚙️ MODO DIAGNÓSTICO: Verificando {len(LEAGUES)} ligas na temporada {SEASON_TARGET}")
+print(f"🔑 Usando chave (início): {API_KEY[:5]}...")
 
 # -------------------------------------------------------------------------
 # CONEXÃO FIREBASE
@@ -46,39 +46,27 @@ if not firebase_admin._apps:
             cred = credentials.Certificate(local_key_path)
             firebase_admin.initialize_app(cred)
         else:
-            print("⚠️ AVISO: Sem credenciais.")
+            print("⚠️ AVISO: Sem credenciais do Firebase. O script vai rodar mas NÃO vai salvar.")
 
 if firebase_admin._apps:
     db = firestore.client()
+    print("✅ Conectado ao banco de dados!")
 
 # -------------------------------------------------------------------------
 # LÓGICA DE DADOS
 # -------------------------------------------------------------------------
 
 def converter_rodada_para_numero(texto_rodada):
-    """
-    Transforma nomes de fases em números para o App ordenar.
-    Ex: "Regular Season - 5" -> 5
-    Ex: "Final" -> 50
-    """
     texto = str(texto_rodada).lower()
-    
-    # Mapeamento para Copas (Libertadores/Champions)
-    if "final" in texto and "semi" not in texto and "quarter" not in texto and "8" not in texto: return 50
+    if "final" in texto and "semi" not in texto and "quarter" not in texto: return 50
     if "semi" in texto: return 49
     if "quarter" in texto: return 48
-    if "16" in texto or "8th" in texto: return 47 # Oitavas
-    if "32" in texto: return 46
-    
-    # Tenta extrair número normal (Fase de Grupos ou Pontos Corridos)
+    if "16" in texto or "8th" in texto: return 47
     numeros = re.findall(r'\d+', texto)
-    if numeros:
-        return int(numeros[0])
-        
-    return 0 # Desconhecido
+    return int(numeros[0]) if numeros else 0
 
-def coletar_campeonato(league_id):
-    print(f"   -> Baixando Liga ID {league_id}...")
+def coletar_campeonato(league_id, league_name):
+    print(f"   -> Baixando {league_name} (ID {league_id})...")
     url = "https://v3.football.api-sports.io/fixtures"
     headers = {'x-apisports-key': API_KEY}
     params = {"league": league_id, "season": SEASON_TARGET} 
@@ -86,8 +74,23 @@ def coletar_campeonato(league_id):
     try:
         resp = requests.get(url, headers=headers, params=params)
         data = resp.json()
+        
+        # --- BLOCO DE DIAGNÓSTICO ---
+        if "errors" in data and data["errors"]:
+            print(f"      ❌ ERRO DA API: {data['errors']}")
+            # Verifica erros comuns
+            err_str = str(data['errors'])
+            if "key" in err_str.lower(): print("      💡 DICA: Sua API Key parece inválida ou ausente.")
+            if "limit" in err_str.lower(): print("      💡 DICA: Você atingiu o limite diário (100/100).")
+            return pd.DataFrame()
+            
+        if data['results'] == 0:
+            print(f"      ⚠️ API retornou 0 jogos. A temporada {SEASON_TARGET} existe para esta liga?")
+            return pd.DataFrame()
+        # ---------------------------
+
     except Exception as e:
-        print(f"❌ Erro API: {e}")
+        print(f"      ❌ Erro Crítico de Conexão: {e}")
         return pd.DataFrame()
     
     jogos = []
@@ -106,7 +109,7 @@ def coletar_campeonato(league_id):
             
             jogos.append({
                 'id': str(item['fixture']['id']),
-                'league_id': league_id, # Importante para filtrar no App
+                'league_id': league_id,
                 'date': item['fixture']['date'],
                 'home_team': item['teams']['home']['name'],
                 'away_team': item['teams']['away']['name'],
@@ -115,7 +118,7 @@ def coletar_campeonato(league_id):
                 'result': result,
                 'venue': item['fixture']['venue']['name'],
                 'round': rodada_num,
-                'round_label': rodada_str, # Nome original (ex: "Final")
+                'round_label': rodada_str,
                 'status': status
             })
     
@@ -123,6 +126,7 @@ def coletar_campeonato(league_id):
     if not df.empty:
         df['date'] = pd.to_datetime(df['date'])
         df = df.sort_values('date')
+        print(f"      ✅ Sucesso: {len(df)} jogos baixados.")
     return df
 
 def engenharia_de_features(df):
@@ -172,35 +176,36 @@ def engenharia_de_features(df):
     return pd.concat([df.reset_index(drop=True), pd.DataFrame(features_list)], axis=1)
 
 def rodar_robo_multi_liga():
-    if not firebase_admin._apps: return
-    batch = db.batch()
+    batch = None
+    if firebase_admin._apps:
+        batch = db.batch()
+    
     count_total = 0
     
-    # Loop por cada campeonato
     for league_id, league_name in LEAGUES.items():
         print(f"\n--- Processando: {league_name} ---")
         
-        df = coletar_campeonato(league_id)
+        df = coletar_campeonato(league_id, league_name)
         if df.empty: continue
         
         df_enriched = engenharia_de_features(df)
         
-        # Treina IA específica para esta liga (melhor precisão)
         df_treino = df_enriched.dropna(subset=['result'])
+        model = None
         if len(df_treino) > 10:
             X = df_treino[['diff_points', 'home_form_val', 'away_form_val', 'home_attack', 'home_defense', 'away_attack', 'away_defense']]
             y = df_treino['result'].astype(int)
             model = RandomForestClassifier(n_estimators=50, random_state=42)
             model.fit(X, y)
-        else:
-            print("   ⚠️ Poucos dados para treinar IA nesta liga.")
-            model = None
 
-        print(f"   Salvando {len(df_enriched)} jogos...")
+        if not firebase_admin._apps:
+            print("   (Modo Teste: Não salvando no Firebase)")
+            continue
+
+        print(f"   Salvando {len(df_enriched)} jogos no Firebase...")
         
         for index, row in df_enriched.iterrows():
-            # Probabilidades
-            probs = {'home': 33, 'draw': 34, 'away': 33} # Padrão
+            probs = {'home': 33, 'draw': 34, 'away': 33}
             insight = "Dados insuficientes."
             
             if model:
@@ -222,10 +227,10 @@ def rodar_robo_multi_liga():
             
             dados = {
                 'id': row['id'],
-                'leagueId': league_id,      # Essencial para filtro
-                'leagueName': league_name,  # Para mostrar no App
+                'leagueId': league_id,
+                'leagueName': league_name,
                 'round': int(row['round']),
-                'roundLabel': row['round_label'], # "Final", "Rodada 1"
+                'roundLabel': row['round_label'],
                 'homeTeam': row['home_team'], 'awayTeam': row['away_team'],
                 'homeScore': int(row['home_goals']) if pd.notna(row['home_goals']) else None,
                 'awayScore': int(row['away_goals']) if pd.notna(row['away_goals']) else None,
@@ -249,10 +254,13 @@ def rodar_robo_multi_liga():
             if count_total % 400 == 0:
                 batch.commit()
                 batch = db.batch()
-                print(f"   ... lote salvo.")
+                print(f"   ... {count_total} jogos salvos até agora...")
 
-    batch.commit()
-    print(f"✅ FINALIZADO! Total de jogos salvos: {count_total}")
+    if batch and count_total > 0:
+        batch.commit()
+        print(f"\n✅ SUCESSO FINAL! Total de jogos salvos: {count_total}")
+    elif count_total == 0:
+        print("\n❌ FALHA: Nenhum jogo foi salvo. Verifique os erros acima.")
 
 if __name__ == "__main__":
     rodar_robo_multi_liga()
