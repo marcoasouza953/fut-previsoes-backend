@@ -1,0 +1,33 @@
+name: Atualizar Previsões de Futebol
+
+# Quando rodar?
+on:
+  schedule:
+    # Roda todo dia às 09:00 UTC (06:00 Brasil)
+    - cron: '0 9 * * *'
+  # Permite rodar manualmente clicando num botão (para testar)
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v3
+
+      - name: Instalar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Instalar bibliotecas
+        run: |
+          pip install -r requirements.txt
+
+      - name: Rodar o Robô
+        env:
+          # Aqui injetamos os segredos que guardamos no Passo 2
+          FOOTBALL_API_KEY: ${{ secrets.FOOTBALL_API_KEY }}
+          FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS }}
+        run: python main.py
