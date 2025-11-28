@@ -4,6 +4,7 @@ import requests
 import pandas as pd
 import numpy as np
 import datetime
+import time
 import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore
@@ -12,15 +13,16 @@ from sklearn.ensemble import RandomForestClassifier
 # -------------------------------------------------------------------------
 # 1. CONFIGURAÇÕES
 # -------------------------------------------------------------------------
-API_KEY = os.environ.get("FOOTBALL_API_KEY", "SUA_API_KEY_AQUI") 
-LEAGUE_ID = "71"  # Brasileirão Série A
+# Tenta pegar chave do ambiente ou usa a string local
+API_KEY = os.environ.get("FOOTBALL_API_KEY", "SUA_API_KEY_AQUI")
+LEAGUE_ID = "71"  # Brasileirão
 
 hoje = datetime.datetime.now()
 ANO_ATUAL = hoje.year
 SEASON_CURRENT = str(ANO_ATUAL)
 SEASON_TRAIN_HISTORIC = str(ANO_ATUAL - 1)
 
-print(f"⚙️ Robô Iniciado: {hoje.strftime('%d/%m/%Y')}")
+print(f"⚙️ Robô Iniciado: {hoje.strftime('%d/%m/%Y')} | Temporada: {SEASON_CURRENT}")
 
 # -------------------------------------------------------------------------
 # 2. CONEXÃO FIREBASE
@@ -45,38 +47,51 @@ if firebase_admin._apps:
     print("✅ Conectado ao banco de dados!")
 
 # -------------------------------------------------------------------------
-# 3. LÓGICA DE IA
+# 3. LÓGICA DE DADOS
 # -------------------------------------------------------------------------
 
-def coletar_jogos_realizados(season):
-    print(f"   -> Baixando histórico de {season}...")
-    url = "https://v3.football.api-sports.io/fixtures"
+def consultar_api(endpoint, params):
+    """Função auxiliar que trata erros da API"""
+    url = f"https://v3.football.api-sports.io/{endpoint}"
     headers = {'x-apisports-key': API_KEY}
-    params = {"league": LEAGUE_ID, "season": season, "status": "FT"} 
     
     try:
         resp = requests.get(url, headers=headers, params=params)
         data = resp.json()
-    except:
-        return pd.DataFrame()
+        
+        # Verifica erros da API (Limite excedido, chave errada, etc)
+        if "errors" in data and data["errors"]:
+            print(f"❌ ERRO DA API: {data['errors']}")
+            return None
+            
+        return data
+    except Exception as e:
+        print(f"❌ Erro de Conexão: {e}")
+        return None
+
+def coletar_jogos_realizados(season):
+    print(f"   -> Baixando histórico de {season}...")
+    # Baixa jogos terminados (FT)
+    data = consultar_api("fixtures", {"league": LEAGUE_ID, "season": season, "status": "FT"})
+    
+    if not data or 'response' not in data: return pd.DataFrame()
     
     jogos = []
-    if 'response' in data:
-        for item in data['response']:
-            home = item['goals']['home']
-            away = item['goals']['away']
-            if home is None or away is None: continue
-            
-            result = 1 if home > away else (2 if away > home else 0)
-            
-            jogos.append({
-                'date': item['fixture']['date'],
-                'home_team': item['teams']['home']['name'],
-                'away_team': item['teams']['away']['name'],
-                'home_goals': home,
-                'away_goals': away,
-                'result': result
-            })
+    for item in data['response']:
+        home = item['goals']['home']
+        away = item['goals']['away']
+        if home is None or away is None: continue
+        
+        result = 1 if home > away else (2 if away > home else 0)
+        
+        jogos.append({
+            'date': item['fixture']['date'],
+            'home_team': item['teams']['home']['name'],
+            'away_team': item['teams']['away']['name'],
+            'home_goals': home,
+            'away_goals': away,
+            'result': result
+        })
     
     df = pd.DataFrame(jogos)
     if not df.empty:
@@ -88,6 +103,7 @@ def engenharia_de_features(df):
     stats = {}
     all_teams = set(df['home_team']).union(set(df['away_team']))
     
+    # Inicializa stats com valores padrão seguros
     for team in all_teams:
         stats[team] = {'points': 0, 'games': 0, 'goals_scored': 0, 'goals_conceded': 0, 'last_5': []}
 
@@ -98,8 +114,8 @@ def engenharia_de_features(df):
         a = row['away_team']
         
         def get_avg(team, metric):
-            if stats[team]['games'] == 0: return 0
-            return stats[team][metric] / stats[team]['games']
+            if stats[team]['games'] == 0: return 0.0
+            return float(stats[team][metric] / stats[team]['games'])
 
         def get_form(team):
             return sum(stats[team]['last_5'])
@@ -117,6 +133,7 @@ def engenharia_de_features(df):
         }
         features_list.append(features)
 
+        # Atualiza Stats
         stats[h]['games'] += 1; stats[a]['games'] += 1
         stats[h]['goals_scored'] += row['home_goals']; stats[h]['goals_conceded'] += row['away_goals']
         stats[a]['goals_scored'] += row['away_goals']; stats[a]['goals_conceded'] += row['home_goals']
@@ -133,13 +150,16 @@ def engenharia_de_features(df):
 
     return pd.concat([df.reset_index(drop=True), pd.DataFrame(features_list)], axis=1), stats
 
+# -------------------------------------------------------------------------
+# 4. FUNÇÃO PRINCIPAL (O Cérebro)
+# -------------------------------------------------------------------------
 def rodar_robo():
     print("\n2. Treinando Robô...")
     df_historico = coletar_jogos_realizados(SEASON_TRAIN_HISTORIC)
     df_atual = coletar_jogos_realizados(SEASON_CURRENT)
     
     if df_historico.empty and df_atual.empty:
-        print("❌ Sem dados para treinar.")
+        print("❌ CRÍTICO: Não consegui baixar nenhum jogo histórico. Verifique se sua API Key é válida.")
         return
 
     df_treino = pd.concat([df_historico, df_atual], ignore_index=True).sort_values('date')
@@ -151,29 +171,39 @@ def rodar_robo():
     model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
     model.fit(X, y)
     
-    # --- MUDANÇA CRÍTICA AQUI: BUSCA POR DATAS ---
-    print(f"\n4. Buscando jogos de HOJE até +7 dias ({SEASON_CURRENT})...")
-    
-    data_inicio = datetime.date.today().strftime("%Y-%m-%d") # Hoje
-    data_fim = (datetime.date.today() + datetime.timedelta(days=7)).strftime("%Y-%m-%d") # Daqui a 7 dias
-    
-    url = "https://v3.football.api-sports.io/fixtures"
-    headers = {'x-apisports-key': API_KEY}
-    # "from" e "to" pega TUDO nesse intervalo
-    params = {"league": LEAGUE_ID, "season": SEASON_CURRENT, "from": data_inicio, "to": data_fim}
-    
-    try:
-        resp = requests.get(url, headers=headers, params=params)
-        data_next = resp.json()
-    except:
-        data_next = {'results': 0}
+    # ---------------------------------------------------------------------
+    # ESTRATÉGIA DUPLA DE BUSCA DE JOGOS
+    # ---------------------------------------------------------------------
+    print(f"\n4. Buscando jogos reais ({SEASON_CURRENT})...")
     
     jogos_futuros = []
-    if data_next.get('results', 0) > 0:
-        jogos_futuros = data_next['response']
-        print(f"✅ {len(jogos_futuros)} jogos encontrados na grade da semana.")
+    
+    # Tentativa 1: Buscar por DATA (Próximos 7 dias)
+    data_inicio = datetime.date.today().strftime("%Y-%m-%d")
+    data_fim = (datetime.date.today() + datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+    print(f"   -> Tentativa 1: Intervalo {data_inicio} até {data_fim}")
+    
+    data_date = consultar_api("fixtures", {"league": LEAGUE_ID, "season": SEASON_CURRENT, "from": data_inicio, "to": data_fim})
+    
+    if data_date and data_date['results'] > 0:
+        jogos_futuros = data_date['response']
+        print(f"   ✅ Sucesso! {len(jogos_futuros)} jogos encontrados por data.")
     else:
-        print("⚠️ Nenhum jogo encontrado nesta semana. Usando simulação.")
+        # Tentativa 2: Buscar por QUANTIDADE ("Próximos 10", independente da data)
+        print("   ⚠️ Nenhum jogo na data. Tentando buscar 'Next 10'...")
+        data_next = consultar_api("fixtures", {"league": LEAGUE_ID, "season": SEASON_CURRENT, "next": "10"})
+        
+        if data_next and data_next['results'] > 0:
+            jogos_futuros = data_next['response']
+            print(f"   ✅ Sucesso! {len(jogos_futuros)} jogos encontrados pelo método 'Next 10'.")
+        else:
+             print("   ⚠️ API não retornou NENHUM jogo futuro.")
+
+    # Se mesmo assim não tiver jogos, ativa modo simulação
+    usando_simulacao = False
+    if not jogos_futuros:
+        print("   🔄 Ativando MODO SIMULAÇÃO (Último Recurso)")
+        usando_simulacao = True
         last_games = df_treino.tail(5).to_dict('records')
         for lg in last_games:
             jogos_futuros.append({
@@ -182,21 +212,40 @@ def rodar_robo():
                 'is_simulation': True
             })
 
+    # ---------------------------------------------------------------------
+    # LIMPEZA E SALVAMENTO NO FIREBASE
+    # ---------------------------------------------------------------------
     if not firebase_admin._apps: return
 
+    # Passo extra: Limpar simulações antigas se achamos jogos reais
+    if not usando_simulacao:
+        print("5. Faxina: Removendo jogos simulados antigos...")
+        docs = db.collection('games').stream()
+        batch_del = db.batch()
+        count_del = 0
+        for doc in docs:
+            d = doc.to_dict()
+            # Se o ID começa com 'sim_' ou tem campo is_simulation, deleta
+            if str(doc.id).startswith('sim_') or d.get('is_simulation'):
+                batch_del.delete(doc.reference)
+                count_del += 1
+        if count_del > 0:
+            batch_del.commit()
+            print(f"   🗑️ {count_del} jogos simulados removidos.")
+
     batch = db.batch()
-    print("5. Salvando...")
+    print("6. Calculando Previsões e Estatísticas...")
     
     def safe_get_stat(team, metric):
-        if team not in current_stats: return 0
+        if team not in current_stats: return 0.0
         s = current_stats[team]
-        if metric == 'form': return sum(s['last_5'])
-        if s['games'] == 0: return 0
-        return s[metric] / s['games']
+        if metric == 'form': return float(sum(s['last_5']))
+        if s['games'] == 0: return 0.0
+        return float(s[metric] / s['games'])
 
+    count_saved = 0
     for item in jogos_futuros:
-        # Pega apenas jogos Não Iniciados (NS) ou A Definir (TBD)
-        # Se quiser incluir jogos AO VIVO, adicione '1H', '2H', 'HT' na lista abaixo
+        # Filtra jogos: Se for simulação aceita, senão só aceita NS/TBD
         status = item['fixture']['status']['short']
         if not item.get('is_simulation') and status not in ['NS', 'TBD', 'PST']: 
             continue 
@@ -204,38 +253,41 @@ def rodar_robo():
         home = item['teams']['home']['name']
         away = item['teams']['away']['name']
         
-        h_form = safe_get_stat(home, 'form')
-        a_form = safe_get_stat(away, 'form')
+        # Pega estatísticas
         h_att = safe_get_stat(home, 'goals_scored')
         h_def = safe_get_stat(home, 'goals_conceded')
         a_att = safe_get_stat(away, 'goals_scored')
         a_def = safe_get_stat(away, 'goals_conceded')
+        h_form = safe_get_stat(home, 'form')
+        a_form = safe_get_stat(away, 'form')
         
         h_pts = current_stats.get(home, {}).get('points', 0)
         a_pts = current_stats.get(away, {}).get('points', 0)
         
-        features_jogo = [[h_pts - a_pts, h_form, a_form, h_att, h_def, a_att, a_def]]
-        probs = model.predict_proba(features_jogo)[0]
+        # Previsão
+        features = [[h_pts - a_pts, h_form, a_form, h_att, h_def, a_att, a_def]]
+        probs = model.predict_proba(features)[0]
         
-        def points_to_str(pts):
-            mapa = {3:'V', 1:'E', 0:'D'}
-            return "".join([mapa.get(p, '-') for p in pts])
-        
-        insight = "Jogo duro."
+        # Insight
+        insight = "Jogo equilibrado."
         if probs[1] > 0.6: insight = f"{home} favorito com ataque de {h_att:.1f} gols/jogo."
         elif probs[2] > 0.6: insight = f"{away} perigoso contra defesa do {home}."
-        elif abs(h_form - a_form) > 4: insight = f"{home if h_form > a_form else away} vem em melhor fase."
         
         game_id = str(item['fixture']['id'])
         doc_ref = db.collection('games').document(game_id)
         
+        # Data
         ts = int(datetime.datetime.now().timestamp() * 1000)
         try:
             dt = pd.to_datetime(item['fixture']['date'])
             date_fmt = dt.strftime("%d/%m %H:%M")
             ts = int(dt.timestamp() * 1000)
         except:
-            date_fmt = "Data a definir"
+            date_fmt = "A Definir"
+
+        def points_to_str(pts):
+            mapa = {3:'V', 1:'E', 0:'D'}
+            return "".join([mapa.get(p, '-') for p in pts])
 
         dados = {
             'id': game_id,
@@ -245,14 +297,25 @@ def rodar_robo():
             'homeForm': points_to_str(current_stats.get(home, {}).get('last_5', [])),
             'awayForm': points_to_str(current_stats.get(away, {}).get('last_5', [])),
             'probs': {'home': int(probs[1]*100), 'draw': int(probs[0]*100), 'away': int(probs[2]*100)},
-            'stats': {'homeAttack': float(f"{h_att:.2f}"), 'homeDefense': float(f"{h_def:.2f}"), 'awayAttack': float(f"{a_att:.2f}"), 'awayDefense': float(f"{a_def:.2f}")},
+            # Stats Forçadas (Garante que nunca ficam vazias)
+            'stats': {
+                'homeAttack': float(f"{h_att:.2f}"), 
+                'homeDefense': float(f"{h_def:.2f}"), 
+                'awayAttack': float(f"{a_att:.2f}"), 
+                'awayDefense': float(f"{a_def:.2f}"),
+                'isMock': False
+            },
             'insight': insight,
-            'timestamp': ts
+            'timestamp': ts,
+            'is_simulation': usando_simulacao
         }
         batch.set(doc_ref, dados)
+        count_saved += 1
 
     batch.commit()
-    print("✅ GRADE DA SEMANA ATUALIZADA!")
+    print(f"✅ FINALIZADO! {count_saved} jogos salvos no Firebase.")
+    if usando_simulacao:
+        print("⚠️ NOTA: O Robô usou SIMULAÇÃO. Verifique os erros acima para saber porquê.")
 
 if __name__ == "__main__":
     rodar_robo()
