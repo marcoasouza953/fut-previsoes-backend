@@ -1,0 +1,27 @@
+name: Rodar Diagnóstico API
+
+# Isto permite rodar manualmente clicando num botão
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnostico:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v3
+
+      - name: Instalar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Instalar Requests
+        run: pip install requests
+
+      - name: EXECUTAR TESTE
+        env:
+          # Injeta a chave secreta no script
+          FOOTBALL_API_KEY: ${{ secrets.FOOTBALL_API_KEY }}
+        run: python diagnostico.py
