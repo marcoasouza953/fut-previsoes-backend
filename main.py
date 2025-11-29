@@ -1,5 +1,7 @@
 import os
 import json
+import sys
+import traceback
 import requests
 import pandas as pd
 import numpy as np
@@ -13,10 +15,8 @@ from sklearn.ensemble import RandomForestClassifier
 # -------------------------------------------------------------------------
 # 1. CONFIGURAÇÕES (NOVA API)
 # -------------------------------------------------------------------------
-# Substitua pela sua nova chave da football-data.org
 API_KEY = os.environ.get("FOOTBALL_API_KEY", "SUA_NOVA_API_KEY_AQUI") 
 
-# Mapeamento de Ligas (IDs da football-data.org)
 LEAGUES = {
     '2013': 'Brasileirão Série A',
     '2021': 'Premier League (ING)',
@@ -26,15 +26,14 @@ LEAGUES = {
     '2002': 'Bundesliga (ALE)'
 }
 
-# Ano atual da temporada
 SEASON_TARGET = datetime.datetime.now().year
 
-print(f"⚙️ NOVO ROBÔ INICIADO (API: football-data.org)")
+print(f"⚙️ NOVO ROBÔ INICIADO (API: football-data.org)", flush=True)
 
 # -------------------------------------------------------------------------
 # CONEXÃO FIREBASE
 # -------------------------------------------------------------------------
-print("1. Conectando ao Firebase...")
+print("1. Conectando ao Firebase...", flush=True)
 if not firebase_admin._apps:
     firebase_creds_str = os.environ.get("FIREBASE_CREDENTIALS")
     if firebase_creds_str:
@@ -46,71 +45,64 @@ if not firebase_admin._apps:
             cred = credentials.Certificate(local_key_path)
             firebase_admin.initialize_app(cred)
         else:
-            print("⚠️ AVISO: Sem credenciais. O script não salvará nada.")
+            print("⚠️ AVISO: Sem credenciais. O script não salvará nada.", flush=True)
 
 if firebase_admin._apps:
     db = firestore.client()
-    print("✅ Conectado ao banco de dados!")
+    print("✅ Conectado ao banco de dados!", flush=True)
 
 # -------------------------------------------------------------------------
-# LÓGICA DE DADOS (ADAPTADA PARA NOVA API)
+# LÓGICA DE DADOS
 # -------------------------------------------------------------------------
 
 def coletar_campeonato(league_id, league_name):
-    print(f"   -> Baixando {league_name} (ID {league_id})...")
+    print(f"   -> Baixando {league_name} (ID {league_id})...", flush=True)
     
-    # URL da nova API
     url = f"https://api.football-data.org/v4/competitions/{league_id}/matches"
     headers = {'X-Auth-Token': API_KEY}
-    
-    # Esta API baixa a temporada inteira por padrão
     params = {"season": SEASON_TARGET} 
     
     try:
         resp = requests.get(url, headers=headers, params=params)
         
         if resp.status_code == 403:
-            print("      ❌ Erro 403: Chave inválida ou bloqueada.")
+            print("      ❌ Erro 403: Chave inválida ou bloqueada.", flush=True)
             return pd.DataFrame()
         if resp.status_code == 429:
-            print("      ⚠️ Erro 429: Muitas requisições. Espere um pouco.")
+            print("      ⚠️ Erro 429: Muitas requisições. Espere um pouco.", flush=True)
             return pd.DataFrame()
             
         data = resp.json()
         
         if 'matches' not in data:
-            print(f"      ⚠️ Nenhum jogo encontrado ou erro: {data}")
+            print(f"      ⚠️ Nenhum jogo encontrado ou erro: {data}", flush=True)
             return pd.DataFrame()
             
         jogos = []
         for item in data['matches']:
-            # Extração de dados adaptada para o formato football-data.org
             rodada_num = item.get('matchday', 0)
-            
             home_team = item['homeTeam']['name']
             away_team = item['awayTeam']['name']
-            
-            # Logos (Crests)
             home_logo = item['homeTeam'].get('crest', '')
             away_logo = item['awayTeam'].get('crest', '')
             
-            # Placar
             score_h = item['score']['fullTime']['home']
             score_a = item['score']['fullTime']['away']
+            status_api = item['status']
             
-            status_api = item['status'] # SCHEDULED, TIMED, FINISHED, IN_PLAY
-            
-            # Normalizar status para o nosso padrão (FT, NS)
-            if status_api == 'FINISHED':
+            # --- PROTEÇÃO CONTRA PLACAR NULO ---
+            # Só define como 'FT' (Finalizado) se tivermos gols válidos
+            if status_api == 'FINISHED' and score_h is not None and score_a is not None:
                 status = 'FT'
                 result = 1 if score_h > score_a else (2 if score_a > score_h else 0)
             else:
                 status = 'NS'
                 result = None
+            # -----------------------------------
                 
             jogos.append({
                 'id': str(item['id']),
-                'league_id': league_id, # Mantemos o ID da nova API
+                'league_id': league_id,
                 'date': item['utcDate'],
                 'home_team': home_team,
                 'away_team': away_team,
@@ -119,7 +111,7 @@ def coletar_campeonato(league_id, league_name):
                 'home_goals': score_h,
                 'away_goals': score_a,
                 'result': result,
-                'venue': "Estádio", # Essa API free as vezes não manda estádio
+                'venue': "Estádio",
                 'round': rodada_num,
                 'round_label': f"Rodada {rodada_num}",
                 'status': status
@@ -127,20 +119,17 @@ def coletar_campeonato(league_id, league_name):
         
         df = pd.DataFrame(jogos)
         if not df.empty:
-            # Converte data string ISO para datetime
             df['date'] = pd.to_datetime(df['date'])
             df = df.sort_values('date')
-            print(f"      ✅ Sucesso: {len(df)} jogos encontrados.")
+            print(f"      ✅ Sucesso: {len(df)} jogos encontrados.", flush=True)
         return df
 
     except Exception as e:
-        print(f"      ❌ Erro de Conexão: {e}")
+        print(f"      ❌ Erro de Conexão: {e}", flush=True)
         return pd.DataFrame()
 
 def engenharia_de_features(df):
-    """Calcula estatísticas (Ataque, Defesa, Forma)"""
     stats = {}
-    # Inicializa stats para todos os times encontrados
     all_teams = set(df['home_team']).union(set(df['away_team']))
     for team in all_teams:
         stats[team] = {'points': 0, 'games': 0, 'goals_scored': 0, 'goals_conceded': 0, 'last_5': []}
@@ -169,7 +158,6 @@ def engenharia_de_features(df):
         }
         features_list.append(features)
 
-        # Atualiza estatísticas se o jogo já terminou
         if row['status'] == 'FT' and pd.notna(row['home_goals']):
             gh = int(row['home_goals'])
             ga = int(row['away_goals'])
@@ -196,82 +184,96 @@ def rodar_robo_novo():
     count_total = 0
     
     for league_id, league_name in LEAGUES.items():
-        print(f"\n--- Processando: {league_name} ---")
+        print(f"\n--- Processando: {league_name} ---", flush=True)
         
-        df = coletar_campeonato(league_id, league_name)
-        if df.empty: continue
-        
-        df_enriched = engenharia_de_features(df)
-        
-        # Treina IA Simples
-        df_treino = df_enriched[df_enriched['status'] == 'FT']
-        model = None
-        if len(df_treino) > 10:
-            X = df_treino[['diff_points', 'home_form_val', 'away_form_val', 'home_attack', 'home_defense', 'away_attack', 'away_defense']]
-            y = df_treino['result'].astype(int)
-            model = RandomForestClassifier(n_estimators=50, random_state=42)
-            model.fit(X, y)
-
-        print(f"   Salvando {len(df_enriched)} jogos no Firebase...")
-        
-        for index, row in df_enriched.iterrows():
-            probs = {'home': 33, 'draw': 34, 'away': 33}
-            insight = "Aguardando dados."
+        try:
+            df = coletar_campeonato(league_id, league_name)
+            if df.empty: continue
             
-            # Previsão
-            if model:
-                feats = [[
-                    row['diff_points'], row['home_form_val'], row['away_form_val'],
-                    row['home_attack'], row['home_defense'], row['away_attack'], row['away_defense']
-                ]]
-                p = model.predict_proba(feats)[0]
-                probs = {'home': int(p[1]*100), 'draw': int(p[0]*100), 'away': int(p[2]*100)}
+            df_enriched = engenharia_de_features(df)
+            
+            df_treino = df_enriched[df_enriched['status'] == 'FT']
+            model = None
+            if len(df_treino) > 10:
+                X = df_treino[['diff_points', 'home_form_val', 'away_form_val', 'home_attack', 'home_defense', 'away_attack', 'away_defense']]
+                y = df_treino['result'].astype(int)
+                model = RandomForestClassifier(n_estimators=50, random_state=42)
+                model.fit(X, y)
+
+            print(f"   Salvando {len(df_enriched)} jogos no Firebase...", flush=True)
+            
+            for index, row in df_enriched.iterrows():
+                probs = {'home': 33, 'draw': 34, 'away': 33}
+                insight = "Aguardando dados."
                 
-                if p[1] > 0.55: insight = f"{row['home_team']} favorito em casa."
-                elif p[2] > 0.55: insight = f"{row['away_team']} favorito fora."
-                else: insight = "Jogo equilibrado."
+                if model:
+                    try:
+                        feats = [[
+                            row['diff_points'], row['home_form_val'], row['away_form_val'],
+                            row['home_attack'], row['home_defense'], row['away_attack'], row['away_defense']
+                        ]]
+                        # Tratar NaNs antes de prever
+                        if not np.isnan(feats).any():
+                            p = model.predict_proba(feats)[0]
+                            probs = {'home': int(p[1]*100), 'draw': int(p[0]*100), 'away': int(p[2]*100)}
+                            
+                            if p[1] > 0.55: insight = f"{row['home_team']} favorito em casa."
+                            elif p[2] > 0.55: insight = f"{row['away_team']} favorito fora."
+                            else: insight = "Jogo equilibrado."
+                    except Exception as e:
+                        print(f"      ⚠️ Erro na previsão do jogo {row['id']}: {e}", flush=True)
 
-            # Formata Data
-            ts = int(row['date'].timestamp() * 1000)
-            date_fmt = row['date'].strftime("%d/%m %H:%M")
-            
-            doc_ref = db.collection('games').document(row['id'])
-            
-            # Mapeia para o formato que o React Native espera
-            dados = {
-                'id': row['id'],
-                'leagueId': league_id,      # ID novo (ex: 2013)
-                'leagueName': league_name,
-                'round': int(row['round']),
-                'roundLabel': str(row['round_label']),
-                'homeTeam': row['home_team'], 'awayTeam': row['away_team'],
-                'homeLogo': row['home_logo'], 'awayLogo': row['away_logo'], # URLs novas
-                'homeScore': int(row['home_goals']) if pd.notna(row['home_goals']) else None,
-                'awayScore': int(row['away_goals']) if pd.notna(row['away_goals']) else None,
-                'date': date_fmt,
-                'venue': row['venue'],
-                'probs': probs,
-                'stats': {
-                    'homeAttack': float(f"{row['home_attack']:.2f}"), 
-                    'homeDefense': float(f"{row['home_defense']:.2f}"), 
-                    'awayAttack': float(f"{row['away_attack']:.2f}"), 
-                    'awayDefense': float(f"{row['away_defense']:.2f}"),
-                    'isMock': False
-                },
-                'insight': insight,
-                'timestamp': ts,
-                'status': row['status']
-            }
-            batch.set(doc_ref, dados)
-            count_total += 1
-            
-            if count_total % 400 == 0:
-                batch.commit()
-                batch = db.batch()
-                print(f"   ... lote salvo.")
+                ts = int(row['date'].timestamp() * 1000)
+                date_fmt = row['date'].strftime("%d/%m %H:%M")
+                
+                doc_ref = db.collection('games').document(row['id'])
+                
+                dados = {
+                    'id': row['id'],
+                    'leagueId': league_id,
+                    'leagueName': league_name,
+                    'round': int(row['round']) if pd.notna(row['round']) else 0,
+                    'roundLabel': str(row['round_label']),
+                    'homeTeam': str(row['home_team']), 'awayTeam': str(row['away_team']),
+                    'homeLogo': str(row['home_logo']), 'awayLogo': str(row['away_logo']),
+                    'homeScore': int(row['home_goals']) if pd.notna(row['home_goals']) else None,
+                    'awayScore': int(row['away_goals']) if pd.notna(row['away_goals']) else None,
+                    'date': date_fmt,
+                    'venue': str(row['venue']),
+                    'probs': probs,
+                    'stats': {
+                        'homeAttack': float(f"{row['home_attack']:.2f}"), 
+                        'homeDefense': float(f"{row['home_defense']:.2f}"), 
+                        'awayAttack': float(f"{row['away_attack']:.2f}"), 
+                        'awayDefense': float(f"{row['away_defense']:.2f}"),
+                        'isMock': False
+                    },
+                    'insight': insight,
+                    'timestamp': ts,
+                    'status': row['status']
+                }
+                batch.set(doc_ref, dados)
+                count_total += 1
+                
+                if count_total % 400 == 0:
+                    batch.commit()
+                    batch = db.batch()
+                    print(f"   ... lote salvo.", flush=True)
 
-    batch.commit()
-    print(f"\n✅ SUCESSO! Total de jogos salvos com NOVA API: {count_total}")
+        except Exception as e:
+            print(f"❌ Erro ao processar liga {league_name}: {e}", flush=True)
+            traceback.print_exc()
+
+    if count_total > 0:
+        batch.commit()
+        print(f"\n✅ SUCESSO! Total de jogos salvos com NOVA API: {count_total}", flush=True)
+    else:
+        print("\n⚠️ Nenhum jogo salvo. Verifique logs acima.", flush=True)
 
 if __name__ == "__main__":
-    rodar_robo_novo()
+    try:
+        rodar_robo_novo()
+    except Exception as e:
+        print(f"🔥 ERRO FATAL: {e}")
+        traceback.print_exc()
+        sys.exit(1)
