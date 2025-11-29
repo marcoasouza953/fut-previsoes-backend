@@ -275,21 +275,3 @@ def rodar_robo_novo():
 
 if __name__ == "__main__":
     rodar_robo_novo()
-
-
-### Importante: Atualizar o App (`index.js`) 📱
-
-Como os IDs das ligas mudaram (Brasileirão agora é `2013` em vez de `71`), precisamos de atualizar a lista `LEAGUES` no seu arquivo `index.js` (Frontend) para que os botões funcionem.
-
-No seu ficheiro `index.js`, procure a constante `LEAGUES` e substitua por esta:
-
-javascript
-// IDs atualizados para football-data.org
-const LEAGUES = [
-    { id: '2013', name: 'Brasileirão', color: '#22c55e' },
-    { id: '2001', name: 'Champions', color: '#3b82f6' },
-    { id: '2021', name: 'Premier League', color: '#a855f7' },
-    { id: '2014', name: 'La Liga', color: '#ef4444' },
-    { id: '2019', name: 'Serie A', color: '#0ea5e9' },
-    { id: '2002', name: 'Bundesliga', color: '#f59e0b' },
-];
