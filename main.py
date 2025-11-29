@@ -5,36 +5,31 @@ import pandas as pd
 import numpy as np
 import datetime
 import re
-import random
 import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore
 from sklearn.ensemble import RandomForestClassifier
 
 # -------------------------------------------------------------------------
-# 1. CONFIGURAÇÕES
+# 1. CONFIGURAÇÕES (NOVA API)
 # -------------------------------------------------------------------------
-API_KEY = os.environ.get("FOOTBALL_API_KEY", "SUA_API_KEY_AQUI") 
-SEASON_TARGET = "2023" 
+# Substitua pela sua nova chave da football-data.org
+API_KEY = os.environ.get("FOOTBALL_API_KEY", "SUA_NOVA_API_KEY_AQUI") 
 
+# Mapeamento de Ligas (IDs da football-data.org)
 LEAGUES = {
-    '71': 'Brasileirão Série A',
-    '13': 'Copa Libertadores',
-    '2': 'Champions League',
-    '11': 'Copa Sul-Americana',
-    '39': 'Premier League (ING)',
-    '140': 'La Liga (ESP)'
+    '2013': 'Brasileirão Série A',
+    '2021': 'Premier League (ING)',
+    '2014': 'La Liga (ESP)',
+    '2001': 'Champions League',
+    '2019': 'Serie A (ITA)',
+    '2002': 'Bundesliga (ALE)'
 }
 
-# Times para o Modo Offline
-MOCK_TEAMS = {
-    '71': ['Flamengo', 'Palmeiras', 'São Paulo', 'Corinthians', 'Vasco', 'Fluminense', 'Botafogo', 'Grêmio', 'Inter', 'Atlético-MG', 'Cruzeiro', 'Bahia', 'Fortaleza', 'Athletico-PR', 'Santos', 'Goiás', 'Coritiba', 'América-MG', 'Cuiabá', 'Red Bull Bragantino'],
-    '39': ['Man City', 'Liverpool', 'Arsenal', 'Man Utd', 'Chelsea', 'Tottenham', 'Newcastle', 'Aston Villa', 'Brighton', 'West Ham', 'Crystal Palace', 'Wolves', 'Everton', 'Fulham', 'Brentford', 'Nottingham', 'Bournemouth', 'Luton', 'Burnley', 'Sheffield'],
-    '140': ['Real Madrid', 'Barcelona', 'Atlético Madrid', 'Sevilla', 'Real Sociedad', 'Betis', 'Villarreal', 'Athletic Bilbao', 'Osasuna', 'Girona', 'Rayo Vallecano', 'Mallorca', 'Celta Vigo', 'Valencia', 'Getafe', 'Almería', 'Cádiz', 'Granada', 'Las Palmas', 'Alavés'],
-    '2': ['Real Madrid', 'Man City', 'Bayern', 'PSG', 'Inter Milan', 'Barcelona', 'Arsenal', 'Dortmund', 'Atlético Madrid', 'Porto', 'Benfica', 'Napoli', 'Milan', 'RB Leipzig', 'PSV', 'Feyenoord'],
-}
+# Ano atual da temporada
+SEASON_TARGET = datetime.datetime.now().year
 
-print(f"⚙️ MODO HÍBRIDO: Atualizando com Escudos...")
+print(f"⚙️ NOVO ROBÔ INICIADO (API: football-data.org)")
 
 # -------------------------------------------------------------------------
 # CONEXÃO FIREBASE
@@ -51,160 +46,101 @@ if not firebase_admin._apps:
             cred = credentials.Certificate(local_key_path)
             firebase_admin.initialize_app(cred)
         else:
-            print("⚠️ AVISO: Sem credenciais do Firebase. O script vai rodar mas NÃO vai salvar.")
+            print("⚠️ AVISO: Sem credenciais. O script não salvará nada.")
 
 if firebase_admin._apps:
     db = firestore.client()
     print("✅ Conectado ao banco de dados!")
 
 # -------------------------------------------------------------------------
-# GERADOR DE DADOS (MODO OFFLINE)
+# LÓGICA DE DADOS (ADAPTADA PARA NOVA API)
 # -------------------------------------------------------------------------
-def gerar_campeonato_falso(league_id):
-    print(f"      🎲 Gerando dados fictícios para Liga {league_id}...")
-    teams = MOCK_TEAMS.get(league_id, MOCK_TEAMS['71'])
-    random.shuffle(teams)
-    
-    jogos = []
-    game_counter = 0
-    num_teams = len(teams)
-    total_rounds = (num_teams - 1) * 2
-    data_base = datetime.datetime.now() - datetime.timedelta(days=200)
-    
-    # Placeholder de escudo para modo offline
-    DEFAULT_LOGO = "https://media.api-sports.io/football/teams/default.png"
-
-    for rodada in range(1, total_rounds + 1):
-        random.shuffle(teams)
-        metade = num_teams // 2
-        
-        for i in range(metade):
-            home_team = teams[i]
-            away_team = teams[i + metade]
-            gols_h = int(np.random.poisson(1.5))
-            gols_a = int(np.random.poisson(1.0))
-            
-            status = 'FT'
-            result = 1 if gols_h > gols_a else (2 if gols_a > gols_h else 0)
-            
-            if rodada >= 35:
-                status = 'NS'
-                gols_h = None
-                gols_a = None
-                result = None
-                data_jogo = datetime.datetime.now() + datetime.timedelta(days=(rodada-34)*3)
-            else:
-                data_jogo = data_base + datetime.timedelta(weeks=rodada)
-
-            jogos.append({
-                'id': f"mock_{league_id}_{game_counter}",
-                'league_id': league_id,
-                'date': data_jogo,
-                'home_team': home_team,
-                'away_team': away_team,
-                'home_logo': DEFAULT_LOGO, # Adicionado
-                'away_logo': DEFAULT_LOGO, # Adicionado
-                'home_goals': gols_h,
-                'away_goals': gols_a,
-                'result': result,
-                'venue': "Estádio Virtual",
-                'round': rodada,
-                'round_label': f"Rodada {rodada}",
-                'status': status
-            })
-            game_counter += 1
-            
-    return pd.DataFrame(jogos)
-
-# -------------------------------------------------------------------------
-# LÓGICA DE DADOS (API REAL)
-# -------------------------------------------------------------------------
-
-def converter_rodada_para_numero(texto_rodada):
-    texto = str(texto_rodada).lower()
-    if "final" in texto and "semi" not in texto and "quarter" not in texto: return 50
-    if "semi" in texto: return 49
-    if "quarter" in texto: return 48
-    if "16" in texto or "8th" in texto: return 47
-    numeros = re.findall(r'\d+', texto)
-    return int(numeros[0]) if numeros else 0
 
 def coletar_campeonato(league_id, league_name):
     print(f"   -> Baixando {league_name} (ID {league_id})...")
     
-    usar_mock = False
-    if API_KEY == "SUA_API_KEY_AQUI" or not API_KEY:
-        print("      ⚠️ Sem API Key configurada. Usando Modo Offline.")
-        usar_mock = True
-    else:
-        url = "https://v3.football.api-sports.io/fixtures"
-        headers = {'x-apisports-key': API_KEY}
-        params = {"league": league_id, "season": SEASON_TARGET} 
-        
-        try:
-            resp = requests.get(url, headers=headers, params=params)
-            data = resp.json()
-            
-            if "errors" in data and data["errors"]:
-                print(f"      ❌ ERRO API: {data['errors']} -> Ativando Modo Offline.")
-                usar_mock = True
-            elif data['results'] == 0:
-                print(f"      ⚠️ API retornou 0 jogos. -> Ativando Modo Offline.")
-                usar_mock = True
-            else:
-                jogos = []
-                for item in data['response']:
-                    rodada_str = item['league']['round']
-                    rodada_num = converter_rodada_para_numero(rodada_str)
-                    home = item['goals']['home']
-                    away = item['goals']['away']
-                    status = item['fixture']['status']['short']
-                    
-                    # --- CAPTURA DOS LOGOS ---
-                    home_logo = item['teams']['home']['logo']
-                    away_logo = item['teams']['away']['logo']
-                    # -------------------------
-
-                    result = None
-                    if status == 'FT' and home is not None and away is not None:
-                        result = 1 if home > away else (2 if away > home else 0)
-                    
-                    jogos.append({
-                        'id': str(item['fixture']['id']),
-                        'league_id': league_id,
-                        'date': item['fixture']['date'],
-                        'home_team': item['teams']['home']['name'],
-                        'away_team': item['teams']['away']['name'],
-                        'home_logo': home_logo, # Salva URL
-                        'away_logo': away_logo, # Salva URL
-                        'home_goals': home,
-                        'away_goals': away,
-                        'result': result,
-                        'venue': item['fixture']['venue']['name'],
-                        'round': rodada_num,
-                        'round_label': rodada_str,
-                        'status': status
-                    })
-                
-                df = pd.DataFrame(jogos)
-                if not df.empty:
-                    df['date'] = pd.to_datetime(df['date'])
-                    df = df.sort_values('date')
-                    return df
-                else:
-                    usar_mock = True
-
-        except Exception as e:
-            print(f"      ❌ Erro de Conexão: {e} -> Ativando Modo Offline.")
-            usar_mock = True
-
-    if usar_mock:
-        return gerar_campeonato_falso(league_id)
+    # URL da nova API
+    url = f"https://api.football-data.org/v4/competitions/{league_id}/matches"
+    headers = {'X-Auth-Token': API_KEY}
     
-    return pd.DataFrame()
+    # Esta API baixa a temporada inteira por padrão
+    params = {"season": SEASON_TARGET} 
+    
+    try:
+        resp = requests.get(url, headers=headers, params=params)
+        
+        if resp.status_code == 403:
+            print("      ❌ Erro 403: Chave inválida ou bloqueada.")
+            return pd.DataFrame()
+        if resp.status_code == 429:
+            print("      ⚠️ Erro 429: Muitas requisições. Espere um pouco.")
+            return pd.DataFrame()
+            
+        data = resp.json()
+        
+        if 'matches' not in data:
+            print(f"      ⚠️ Nenhum jogo encontrado ou erro: {data}")
+            return pd.DataFrame()
+            
+        jogos = []
+        for item in data['matches']:
+            # Extração de dados adaptada para o formato football-data.org
+            rodada_num = item.get('matchday', 0)
+            
+            home_team = item['homeTeam']['name']
+            away_team = item['awayTeam']['name']
+            
+            # Logos (Crests)
+            home_logo = item['homeTeam'].get('crest', '')
+            away_logo = item['awayTeam'].get('crest', '')
+            
+            # Placar
+            score_h = item['score']['fullTime']['home']
+            score_a = item['score']['fullTime']['away']
+            
+            status_api = item['status'] # SCHEDULED, TIMED, FINISHED, IN_PLAY
+            
+            # Normalizar status para o nosso padrão (FT, NS)
+            if status_api == 'FINISHED':
+                status = 'FT'
+                result = 1 if score_h > score_a else (2 if score_a > score_h else 0)
+            else:
+                status = 'NS'
+                result = None
+                
+            jogos.append({
+                'id': str(item['id']),
+                'league_id': league_id, # Mantemos o ID da nova API
+                'date': item['utcDate'],
+                'home_team': home_team,
+                'away_team': away_team,
+                'home_logo': home_logo,
+                'away_logo': away_logo,
+                'home_goals': score_h,
+                'away_goals': score_a,
+                'result': result,
+                'venue': "Estádio", # Essa API free as vezes não manda estádio
+                'round': rodada_num,
+                'round_label': f"Rodada {rodada_num}",
+                'status': status
+            })
+        
+        df = pd.DataFrame(jogos)
+        if not df.empty:
+            # Converte data string ISO para datetime
+            df['date'] = pd.to_datetime(df['date'])
+            df = df.sort_values('date')
+            print(f"      ✅ Sucesso: {len(df)} jogos encontrados.")
+        return df
+
+    except Exception as e:
+        print(f"      ❌ Erro de Conexão: {e}")
+        return pd.DataFrame()
 
 def engenharia_de_features(df):
+    """Calcula estatísticas (Ataque, Defesa, Forma)"""
     stats = {}
+    # Inicializa stats para todos os times encontrados
     all_teams = set(df['home_team']).union(set(df['away_team']))
     for team in all_teams:
         stats[team] = {'points': 0, 'games': 0, 'goals_scored': 0, 'goals_conceded': 0, 'last_5': []}
@@ -233,19 +169,16 @@ def engenharia_de_features(df):
         }
         features_list.append(features)
 
-        if row['result'] is not None:
-            gh = row['home_goals'] if row['home_goals'] is not None else 0
-            ga = row['away_goals'] if row['away_goals'] is not None else 0
+        # Atualiza estatísticas se o jogo já terminou
+        if row['status'] == 'FT' and pd.notna(row['home_goals']):
+            gh = int(row['home_goals'])
+            ga = int(row['away_goals'])
             
             stats[h]['games'] += 1; stats[a]['games'] += 1
             stats[h]['goals_scored'] += gh; stats[h]['goals_conceded'] += ga
             stats[a]['goals_scored'] += ga; stats[a]['goals_conceded'] += gh
             
-            if row['result'] is not None:
-                res = row['result']
-            else:
-                res = 1 if gh > ga else (2 if ga > gh else 0)
-
+            res = 1 if gh > ga else (2 if ga > gh else 0)
             pts_h = 3 if res == 1 else (1 if res == 0 else 0)
             pts_a = 3 if res == 2 else (1 if res == 0 else 0)
             
@@ -257,11 +190,9 @@ def engenharia_de_features(df):
 
     return pd.concat([df.reset_index(drop=True), pd.DataFrame(features_list)], axis=1)
 
-def rodar_robo_multi_liga():
-    batch = None
-    if firebase_admin._apps:
-        batch = db.batch()
-    
+def rodar_robo_novo():
+    if not firebase_admin._apps: return
+    batch = db.batch()
     count_total = 0
     
     for league_id, league_name in LEAGUES.items():
@@ -272,7 +203,8 @@ def rodar_robo_multi_liga():
         
         df_enriched = engenharia_de_features(df)
         
-        df_treino = df_enriched.dropna(subset=['result'])
+        # Treina IA Simples
+        df_treino = df_enriched[df_enriched['status'] == 'FT']
         model = None
         if len(df_treino) > 10:
             X = df_treino[['diff_points', 'home_form_val', 'away_form_val', 'home_attack', 'home_defense', 'away_attack', 'away_defense']]
@@ -280,16 +212,13 @@ def rodar_robo_multi_liga():
             model = RandomForestClassifier(n_estimators=50, random_state=42)
             model.fit(X, y)
 
-        if not firebase_admin._apps:
-            print("   (Modo Teste: Não salvando no Firebase)")
-            continue
-
         print(f"   Salvando {len(df_enriched)} jogos no Firebase...")
         
         for index, row in df_enriched.iterrows():
             probs = {'home': 33, 'draw': 34, 'away': 33}
-            insight = "Dados insuficientes."
+            insight = "Aguardando dados."
             
+            # Previsão
             if model:
                 feats = [[
                     row['diff_points'], row['home_form_val'], row['away_form_val'],
@@ -298,34 +227,29 @@ def rodar_robo_multi_liga():
                 p = model.predict_proba(feats)[0]
                 probs = {'home': int(p[1]*100), 'draw': int(p[0]*100), 'away': int(p[2]*100)}
                 
-                if p[1] > 0.6: insight = f"{row['home_team']} é muito favorito em casa."
-                elif p[2] > 0.6: insight = f"{row['away_team']} deve vencer fora."
-                else: insight = "Jogo muito equilibrado."
+                if p[1] > 0.55: insight = f"{row['home_team']} favorito em casa."
+                elif p[2] > 0.55: insight = f"{row['away_team']} favorito fora."
+                else: insight = "Jogo equilibrado."
 
+            # Formata Data
             ts = int(row['date'].timestamp() * 1000)
-            date_fmt = row['date'].strftime("%d/%m")
+            date_fmt = row['date'].strftime("%d/%m %H:%M")
             
             doc_ref = db.collection('games').document(row['id'])
             
-            status_final = row['status']
-            score_h = int(row['home_goals']) if pd.notna(row['home_goals']) else None
-            score_a = int(row['away_goals']) if pd.notna(row['away_goals']) else None
-
+            # Mapeia para o formato que o React Native espera
             dados = {
                 'id': row['id'],
-                'leagueId': league_id,
+                'leagueId': league_id,      # ID novo (ex: 2013)
                 'leagueName': league_name,
                 'round': int(row['round']),
                 'roundLabel': str(row['round_label']),
                 'homeTeam': row['home_team'], 'awayTeam': row['away_team'],
-                # NOVOS CAMPOS DE LOGO
-                'homeLogo': row['home_logo'],
-                'awayLogo': row['away_logo'],
-                # --------------------
-                'homeScore': score_h,
-                'awayScore': score_a,
+                'homeLogo': row['home_logo'], 'awayLogo': row['away_logo'], # URLs novas
+                'homeScore': int(row['home_goals']) if pd.notna(row['home_goals']) else None,
+                'awayScore': int(row['away_goals']) if pd.notna(row['away_goals']) else None,
                 'date': date_fmt,
-                'venue': row['venue'] or "",
+                'venue': row['venue'],
                 'probs': probs,
                 'stats': {
                     'homeAttack': float(f"{row['home_attack']:.2f}"), 
@@ -336,7 +260,7 @@ def rodar_robo_multi_liga():
                 },
                 'insight': insight,
                 'timestamp': ts,
-                'status': status_final
+                'status': row['status']
             }
             batch.set(doc_ref, dados)
             count_total += 1
@@ -346,11 +270,26 @@ def rodar_robo_multi_liga():
                 batch = db.batch()
                 print(f"   ... lote salvo.")
 
-    if batch and count_total > 0:
-        batch.commit()
-        print(f"\n✅ SUCESSO FINAL! Total de jogos salvos: {count_total}")
-    elif count_total == 0:
-        print("\n❌ FALHA: Nenhum jogo foi salvo.")
+    batch.commit()
+    print(f"\n✅ SUCESSO! Total de jogos salvos com NOVA API: {count_total}")
 
 if __name__ == "__main__":
-    rodar_robo_multi_liga()
+    rodar_robo_novo()
+```
+
+### Importante: Atualizar o App (`index.js`) 📱
+
+Como os IDs das ligas mudaram (Brasileirão agora é `2013` em vez de `71`), precisamos de atualizar a lista `LEAGUES` no seu arquivo `index.js` (Frontend) para que os botões funcionem.
+
+No seu ficheiro `index.js`, procure a constante `LEAGUES` e substitua por esta:
+
+```javascript
+// IDs atualizados para football-data.org
+const LEAGUES = [
+    { id: '2013', name: 'Brasileirão', color: '#22c55e' },
+    { id: '2001', name: 'Champions', color: '#3b82f6' },
+    { id: '2021', name: 'Premier League', color: '#a855f7' },
+    { id: '2014', name: 'La Liga', color: '#ef4444' },
+    { id: '2019', name: 'Serie A', color: '#0ea5e9' },
+    { id: '2002', name: 'Bundesliga', color: '#f59e0b' },
+];
