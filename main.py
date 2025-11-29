@@ -90,15 +90,12 @@ def coletar_campeonato(league_id, league_name):
             score_a = item['score']['fullTime']['away']
             status_api = item['status']
             
-            # --- PROTEÇÃO CONTRA PLACAR NULO ---
-            # Só define como 'FT' (Finalizado) se tivermos gols válidos
             if status_api == 'FINISHED' and score_h is not None and score_a is not None:
                 status = 'FT'
                 result = 1 if score_h > score_a else (2 if score_a > score_h else 0)
             else:
                 status = 'NS'
                 result = None
-            # -----------------------------------
                 
             jogos.append({
                 'id': str(item['id']),
@@ -178,10 +175,32 @@ def engenharia_de_features(df):
 
     return pd.concat([df.reset_index(drop=True), pd.DataFrame(features_list)], axis=1)
 
+def sanitize_record(record):
+    """
+    Função crucial: Converte tipos Numpy/Pandas para tipos nativos do Python
+    para evitar erros no Firebase.
+    """
+    new_record = {}
+    for key, value in record.items():
+        if isinstance(value, (np.integer, np.int64, np.int32)):
+            new_record[key] = int(value)
+        elif isinstance(value, (np.floating, np.float64, np.float32)):
+            new_record[key] = float(value)
+        elif isinstance(value, (np.ndarray, list)):
+            new_record[key] = [sanitize_record(v) if isinstance(v, dict) else v for v in value]
+        elif isinstance(value, dict):
+            new_record[key] = sanitize_record(value)
+        elif pd.isna(value):  # Trata NaN e NaT
+            new_record[key] = None
+        else:
+            new_record[key] = value
+    return new_record
+
 def rodar_robo_novo():
     if not firebase_admin._apps: return
     batch = db.batch()
     count_total = 0
+    count_batch = 0
     
     for league_id, league_name in LEAGUES.items():
         print(f"\n--- Processando: {league_name} ---", flush=True)
@@ -221,14 +240,16 @@ def rodar_robo_novo():
                             elif p[2] > 0.55: insight = f"{row['away_team']} favorito fora."
                             else: insight = "Jogo equilibrado."
                     except Exception as e:
-                        print(f"      ⚠️ Erro na previsão do jogo {row['id']}: {e}", flush=True)
+                        # Erros de previsão não devem parar o script
+                        pass
 
                 ts = int(row['date'].timestamp() * 1000)
                 date_fmt = row['date'].strftime("%d/%m %H:%M")
                 
                 doc_ref = db.collection('games').document(row['id'])
                 
-                dados = {
+                # Monta dicionário bruto
+                dados_raw = {
                     'id': row['id'],
                     'leagueId': league_id,
                     'leagueName': league_name,
@@ -236,36 +257,46 @@ def rodar_robo_novo():
                     'roundLabel': str(row['round_label']),
                     'homeTeam': str(row['home_team']), 'awayTeam': str(row['away_team']),
                     'homeLogo': str(row['home_logo']), 'awayLogo': str(row['away_logo']),
-                    'homeScore': int(row['home_goals']) if pd.notna(row['home_goals']) else None,
-                    'awayScore': int(row['away_goals']) if pd.notna(row['away_goals']) else None,
+                    'homeScore': row['home_goals'], # Deixe o sanitizer tratar
+                    'awayScore': row['away_goals'],
                     'date': date_fmt,
                     'venue': str(row['venue']),
                     'probs': probs,
                     'stats': {
-                        'homeAttack': float(f"{row['home_attack']:.2f}"), 
-                        'homeDefense': float(f"{row['home_defense']:.2f}"), 
-                        'awayAttack': float(f"{row['away_attack']:.2f}"), 
-                        'awayDefense': float(f"{row['away_defense']:.2f}"),
+                        'homeAttack': row['home_attack'], 
+                        'homeDefense': row['home_defense'], 
+                        'awayAttack': row['away_attack'], 
+                        'awayDefense': row['away_defense'],
                         'isMock': False
                     },
                     'insight': insight,
                     'timestamp': ts,
                     'status': row['status']
                 }
-                batch.set(doc_ref, dados)
-                count_total += 1
                 
-                if count_total % 400 == 0:
+                # SANITIZAÇÃO (A CORREÇÃO PRINCIPAL)
+                dados_safe = sanitize_record(dados_raw)
+                
+                batch.set(doc_ref, dados_safe)
+                count_total += 1
+                count_batch += 1
+                
+                if count_batch >= 400:
+                    print(f"   ... comitando lote de 400 jogos...", flush=True)
                     batch.commit()
                     batch = db.batch()
-                    print(f"   ... lote salvo.", flush=True)
+                    count_batch = 0
 
         except Exception as e:
             print(f"❌ Erro ao processar liga {league_name}: {e}", flush=True)
             traceback.print_exc()
 
-    if count_total > 0:
+    # Comita o restante
+    if count_batch > 0:
         batch.commit()
+        print(f"   ... último lote salvo.", flush=True)
+
+    if count_total > 0:
         print(f"\n✅ SUCESSO! Total de jogos salvos com NOVA API: {count_total}", flush=True)
     else:
         print("\n⚠️ Nenhum jogo salvo. Verifique logs acima.", flush=True)
@@ -276,4 +307,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"🔥 ERRO FATAL: {e}")
         traceback.print_exc()
-        sys.exit(1)
+        # Não usaremos sys.exit(1) para garantir que os logs sejam impressos até o fim
