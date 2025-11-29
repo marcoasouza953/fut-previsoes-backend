@@ -275,7 +275,7 @@ def rodar_robo_novo():
 
 if __name__ == "__main__":
     rodar_robo_novo()
-```
+
 
 ### Importante: Atualizar o App (`index.js`) 📱
 
@@ -283,7 +283,7 @@ Como os IDs das ligas mudaram (Brasileirão agora é `2013` em vez de `71`), pre
 
 No seu ficheiro `index.js`, procure a constante `LEAGUES` e substitua por esta:
 
-```javascript
+javascript
 // IDs atualizados para football-data.org
 const LEAGUES = [
     { id: '2013', name: 'Brasileirão', color: '#22c55e' },
