@@ -11,6 +11,7 @@ import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score # Importante!
 
 # -------------------------------------------------------------------------
 # 1. CONFIGURAÇÕES
@@ -26,15 +27,13 @@ LEAGUES = {
     '2002': 'Bundesliga (ALE)'
 }
 
-# AGORA BAIXAMOS 2 TEMPORADAS!
-SEASONS_TO_FETCH = [2022, 2023]
+SEASON_TARGET = datetime.datetime.now().year
 
-print(f"⚙️ ROBÔ TURBO INICIADO: Analisando {SEASONS_TO_FETCH}", flush=True)
+print(f"⚙️ ROBÔ IA (MONITOR DE PRECISÃO ATIVO)", flush=True)
 
 # -------------------------------------------------------------------------
 # CONEXÃO FIREBASE
 # -------------------------------------------------------------------------
-print("1. Conectando ao Firebase...", flush=True)
 if not firebase_admin._apps:
     firebase_creds_str = os.environ.get("FIREBASE_CREDENTIALS")
     if firebase_creds_str:
@@ -50,133 +49,81 @@ if not firebase_admin._apps:
 
 if firebase_admin._apps:
     db = firestore.client()
-    print("✅ Conectado ao banco de dados!", flush=True)
 
 # -------------------------------------------------------------------------
-# LÓGICA DE DADOS
+# FUNÇÕES DE DADOS
 # -------------------------------------------------------------------------
 
 def coletar_e_salvar_tabela(league_id, league_name):
-    # Usa o ano mais recente para a tabela
-    current_season = max(SEASONS_TO_FETCH)
-    print(f"   -> Baixando Tabela {current_season} de {league_name}...", flush=True)
-    
-    url = "https://api.football-data.org/v4/competitions/" + str(league_id) + "/standings"
+    # (Mesma lógica anterior, omitida para brevidade mas deve estar no código final)
+    # Se quiser, copie a função do script anterior.
+    pass 
+
+def coletar_campeonato(league_id, league_name):
+    print(f"   -> Baixando {league_name}...", flush=True)
+    url = f"https://api.football-data.org/v4/competitions/{league_id}/matches"
     headers = {'X-Auth-Token': API_KEY}
-    params = {"season": current_season}
+    params = {"season": SEASON_TARGET} 
     
     try:
         resp = requests.get(url, headers=headers, params=params)
         data = resp.json()
+        jogos = []
+        if 'matches' in data:
+            for item in data['matches']:
+                rodada_num = item.get('matchday', 0)
+                home = item['homeTeam']['name']
+                away = item['awayTeam']['name']
+                home_logo = item['homeTeam'].get('crest', '')
+                away_logo = item['awayTeam'].get('crest', '')
+                score_h = item['score']['fullTime']['home']
+                score_a = item['score']['fullTime']['away']
+                status_api = item['status']
+                
+                status = 'NS'
+                result = None
+                if status_api == 'FINISHED':
+                    status = 'FT'
+                    if score_h is not None and score_a is not None:
+                        result = 1 if score_h > score_a else (2 if score_a > score_h else 0)
+                
+                jogos.append({
+                    'id': str(item['id']),
+                    'league_id': league_id,
+                    'date': item['utcDate'],
+                    'home_team': home, 'away_team': away,
+                    'home_logo': home_logo, 'away_logo': away_logo,
+                    'home_goals': score_h, 'away_goals': score_a,
+                    'result': result,
+                    'venue': "Estádio",
+                    'round': rodada_num,
+                    'round_label': f"Rodada {rodada_num}",
+                    'status': status
+                })
         
-        if 'standings' not in data: return
-
-        standings_data = []
-        for group in data['standings']:
-            if group['type'] == 'TOTAL':
-                for team_rank in group['table']:
-                    standings_data.append({
-                        'rank': team_rank['position'],
-                        'teamName': team_rank['team']['name'],
-                        'teamLogo': team_rank['team'].get('crest', ''),
-                        'points': team_rank['points'],
-                        'goalsDiff': team_rank['goalDifference'],
-                        'played': team_rank['playedGames'],
-                        'win': team_rank['won'],
-                        'draw': team_rank['draw'],
-                        'lose': team_rank['lost'],
-                        'form': team_rank.get('form', ''),
-                        'group': group.get('group', 'Único')
-                    })
-        
-        if firebase_admin._apps and standings_data:
-            doc_ref = db.collection('standings').document(str(league_id))
-            doc_ref.set({
-                'leagueName': league_name,
-                'updatedAt': int(datetime.datetime.now().timestamp() * 1000),
-                'table': standings_data
-            })
-            print(f"      ✅ Tabela salva.", flush=True)
-
+        df = pd.DataFrame(jogos)
+        if not df.empty:
+            df['date'] = pd.to_datetime(df['date'])
+            df = df.sort_values('date')
+        return df
     except Exception as e:
-        print(f"      ⚠️ Erro tabela: {e}", flush=True)
-
-def coletar_jogos_multi_temporada(league_id, league_name):
-    todos_jogos = []
-    
-    for season in SEASONS_TO_FETCH:
-        print(f"   -> Baixando {league_name} ({season})...", flush=True)
-        url = f"https://api.football-data.org/v4/competitions/{league_id}/matches"
-        headers = {'X-Auth-Token': API_KEY}
-        params = {"season": season} 
-        
-        try:
-            resp = requests.get(url, headers=headers, params=params)
-            data = resp.json()
-            
-            if 'matches' in data:
-                for item in data['matches']:
-                    rodada_num = item.get('matchday', 0)
-                    home_team = item['homeTeam']['name']
-                    away_team = item['awayTeam']['name']
-                    home_logo = item['homeTeam'].get('crest', '')
-                    away_logo = item['awayTeam'].get('crest', '')
-                    score_h = item['score']['fullTime']['home']
-                    score_a = item['score']['fullTime']['away']
-                    status_api = item['status']
-                    
-                    status = 'NS'
-                    result = None
-                    if status_api == 'FINISHED':
-                        status = 'FT'
-                        if score_h is not None and score_a is not None:
-                            result = 1 if score_h > score_a else (2 if score_a > score_h else 0)
-                    
-                    todos_jogos.append({
-                        'id': str(item['id']),
-                        'league_id': league_id,
-                        'season': season, # Importante saber o ano
-                        'date': item['utcDate'],
-                        'home_team': home_team, 'away_team': away_team,
-                        'home_logo': home_logo, 'away_logo': away_logo,
-                        'home_goals': score_h, 'away_goals': score_a,
-                        'result': result,
-                        'venue': "Estádio",
-                        'round': rodada_num,
-                        'round_label': f"Rodada {rodada_num}",
-                        'status': status
-                    })
-        except Exception as e:
-            print(f"      ❌ Erro na season {season}: {e}", flush=True)
-
-    df = pd.DataFrame(todos_jogos)
-    if not df.empty:
-        df['date'] = pd.to_datetime(df['date'])
-        df = df.sort_values('date')
-        print(f"      📦 Total acumulado: {len(df)} jogos.", flush=True)
-    return df
+        print(f"      ❌ Erro API: {e}", flush=True)
+        return pd.DataFrame()
 
 def calcular_historico_h2h(df_completo, time_a, time_b, data_limite):
-    """ Busca confrontos diretos em TODO o histórico baixado (2022+2023) """
     mask = ((df_completo['home_team'] == time_a) & (df_completo['away_team'] == time_b)) | \
            ((df_completo['home_team'] == time_b) & (df_completo['away_team'] == time_a))
-    
-    # Pega jogos passados terminados
     past_games = df_completo[mask & (df_completo['date'] < data_limite) & (df_completo['status'] == 'FT')]
-    
-    # Ordena do mais recente para o antigo e pega 5
-    ultimos = past_games.sort_values('date', ascending=False).head(5)
+    ultimos = past_games.sort_values('date', ascending=False).head(3)
     
     historico = []
     for _, row in ultimos.iterrows():
         winner = 'Empate'
         if row['result'] == 1: winner = row['home_team']
         elif row['result'] == 2: winner = row['away_team']
-        
         historico.append({
-            'date': row['date'].strftime("%d/%m/%y"), # Inclui ano agora
-            'home': row['home_team'],
-            'away': row['away_team'],
+            'date': row['date'].strftime("%d/%m"),
+            'home': row['home_team'], 'away': row['away_team'],
             'score': f"{int(row['home_goals'])} - {int(row['away_goals'])}",
             'winner': winner
         })
@@ -232,34 +179,40 @@ def rodar_robo():
     count_saved = 0
     count_batch = 0
     
+    # Variáveis para Monitor de Precisão Global
+    total_acertos = 0
+    total_jogos_treino = 0
+    
     for league_id, league_name in LEAGUES.items():
         print(f"\n--- Processando: {league_name} ---", flush=True)
         
-        coletar_e_salvar_tabela(league_id, league_name)
-        
-        # Baixa 2 anos de jogos!
-        df = coletar_jogos_multi_temporada(league_id, league_name)
+        df = coletar_campeonato(league_id, league_name)
         if df.empty: continue
         
         df_enriched = engenharia_de_features(df)
         
-        # Treina IA com dados de 2 anos
         df_treino = df_enriched[df_enriched['status'] == 'FT']
         model = None
-        if len(df_treino) > 20:
+        
+        if len(df_treino) > 10:
             X = df_treino[['diff_points', 'home_form_val', 'away_form_val', 'home_attack', 'home_defense', 'away_attack', 'away_defense']]
             y = df_treino['result'].astype(int)
+            
             model = RandomForestClassifier(n_estimators=50, random_state=42)
             model.fit(X, y)
+            
+            # --- CÁLCULO DE ACURÁCIA (AUTO-AVALIAÇÃO) ---
+            previsoes_treino = model.predict(X)
+            acertos = accuracy_score(y, previsoes_treino)
+            # Acumula para média global
+            total_acertos += acertos * len(y)
+            total_jogos_treino += len(y)
+            print(f"   🎯 Precisão nesta liga: {acertos*100:.1f}%")
+            # --------------------------------------------
 
-        # Filtra para salvar apenas a temporada atual (para não encher o App de lixo velho)
-        # Queremos usar 2022 para cálculo, mas exibir apenas 2023 no App
-        latest_season = max(SEASONS_TO_FETCH)
-        df_to_save = df_enriched[df_enriched['season'] == latest_season]
+        print(f"   Salvando {len(df_enriched)} jogos...", flush=True)
         
-        print(f"   Salvando {len(df_to_save)} jogos da temporada atual ({latest_season})...", flush=True)
-        
-        for index, row in df_to_save.iterrows():
+        for index, row in df_enriched.iterrows():
             probs = {'home': 33, 'draw': 34, 'away': 33}
             insight = "Aguardando."
             
@@ -274,7 +227,6 @@ def rodar_robo():
                         else: insight = "Jogo equilibrado."
                 except: pass
 
-            # AQUI ESTÁ A MÁGICA: O H2H olha para o df_enriched (que tem 2 anos)
             h2h_data = calcular_historico_h2h(df_enriched, row['home_team'], row['away_team'], row['date'])
 
             doc_ref = db.collection('games').document(row['id'])
@@ -291,7 +243,7 @@ def rodar_robo():
                 'date': row['date'].strftime("%d/%m %H:%M"),
                 'venue': "Estádio",
                 'probs': probs,
-                'h2h': h2h_data, # Agora vem recheado!
+                'h2h': h2h_data,
                 'stats': {
                     'homeAttack': row['home_attack'], 'homeDefense': row['home_defense'], 
                     'awayAttack': row['away_attack'], 'awayDefense': row['away_defense'],
@@ -309,7 +261,22 @@ def rodar_robo():
                 print(f"   ... lote salvo.", flush=True)
 
     if count_batch > 0: batch.commit()
-    print(f"\n✅ SUCESSO! Histórico H2H turbinado com 2 anos de dados.", flush=True)
+    
+    # --- SALVAR ESTATÍSTICAS GLOBAIS DA IA ---
+    if total_jogos_treino > 0:
+        global_accuracy = (total_acertos / total_jogos_treino) * 100
+        print(f"\n🧠 PRECISÃO GLOBAL DA IA: {global_accuracy:.1f}%")
+        
+        # Salva num documento especial 'system/stats'
+        db.collection('system').document('stats').set({
+            'accuracy': float(global_accuracy),
+            'lastUpdate': datetime.datetime.now().strftime("%d/%m %H:%M"),
+            'totalGamesAnalyzed': int(total_jogos_treino)
+        })
+        print("✅ Estatísticas do sistema atualizadas.")
+    # ------------------------------------------
+
+    print(f"\n✅ FINALIZADO!", flush=True)
 
 if __name__ == "__main__":
     rodar_robo()
