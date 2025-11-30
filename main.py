@@ -56,9 +56,48 @@ if firebase_admin._apps:
 # -------------------------------------------------------------------------
 
 def coletar_e_salvar_tabela(league_id, league_name):
-    # (Mantém a lógica da tabela igual, não vou repetir para não ficar longo)
-    # Na versão final, essa função deve estar aqui.
-    pass
+    print(f"   -> Baixando Tabela de {league_name}...", flush=True)
+    url = "https://v3.football.api-sports.io/standings"
+    headers = {'x-apisports-key': API_KEY}
+    params = {"league": league_id, "season": SEASON_TARGET}
+    
+    try:
+        resp = requests.get(url, headers=headers, params=params)
+        data = resp.json()
+        
+        if not data.get('response'):
+            print(f"      ⚠️ Sem tabela disponível para esta liga.", flush=True)
+            return
+
+        standings_data = []
+        for league_data in data['response']:
+            for group in league_data['league']['standings']:
+                for team_rank in group:
+                    standings_data.append({
+                        'rank': team_rank['rank'],
+                        'teamName': team_rank['team']['name'],
+                        'teamLogo': team_rank['team']['logo'],
+                        'points': team_rank['points'],
+                        'goalsDiff': team_rank['goalsDiff'],
+                        'played': team_rank['all']['played'],
+                        'win': team_rank['all']['win'],
+                        'draw': team_rank['all']['draw'],
+                        'lose': team_rank['all']['lose'],
+                        'form': team_rank['form'],
+                        'group': league_data['league'].get('group', 'Único')
+                    })
+        
+        if firebase_admin._apps and standings_data:
+            doc_ref = db.collection('standings').document(str(league_id))
+            doc_ref.set({
+                'leagueName': league_name,
+                'updatedAt': int(datetime.datetime.now().timestamp() * 1000),
+                'table': standings_data
+            })
+            print(f"      ✅ Tabela salva ({len(standings_data)} times).", flush=True)
+
+    except Exception as e:
+        print(f"      ❌ Erro ao baixar tabela: {e}", flush=True)
 
 def coletar_campeonato(league_id, league_name):
     print(f"   -> Baixando Jogos de {league_name}...", flush=True)
@@ -116,14 +155,10 @@ def calcular_historico_h2h(df_completo, time_a, time_b, data_limite):
     """
     Procura no dataframe jogos anteriores entre estes dois times.
     """
-    # Filtra jogos onde A jogou contra B (em casa ou fora)
     mask = ((df_completo['home_team'] == time_a) & (df_completo['away_team'] == time_b)) | \
            ((df_completo['home_team'] == time_b) & (df_completo['away_team'] == time_a))
     
-    # Apenas jogos que aconteceram ANTES da data do jogo atual
     past_games = df_completo[mask & (df_completo['date'] < data_limite) & (df_completo['status'] == 'FT')]
-    
-    # Pega os últimos 3
     ultimos = past_games.sort_values('date', ascending=False).head(3)
     
     historico = []
@@ -142,9 +177,6 @@ def calcular_historico_h2h(df_completo, time_a, time_b, data_limite):
     return historico
 
 def engenharia_de_features(df):
-    # (Mantém a engenharia de features igual ao anterior)
-    # Apenas para brevidade, replique a função 'engenharia_de_features' completa aqui
-    # ou use a que já tinha. O importante é o loop de salvamento abaixo.
     stats = {}
     all_teams = set(df['home_team']).union(set(df['away_team']))
     for team in all_teams: stats[team] = {'points': 0, 'games': 0, 'goals_scored': 0, 'goals_conceded': 0, 'last_5': []}
@@ -174,14 +206,25 @@ def engenharia_de_features(df):
     return pd.concat([df.reset_index(drop=True), pd.DataFrame(features_list)], axis=1)
 
 def sanitize_record(record):
+    """
+    Função de limpeza reordenada para evitar erro com listas.
+    """
     new_record = {}
     for key, value in record.items():
-        if isinstance(value, (np.integer, np.int64)): new_record[key] = int(value)
-        elif isinstance(value, (np.floating, np.float64)): new_record[key] = float(value)
-        elif pd.isna(value): new_record[key] = None
-        elif isinstance(value, list): new_record[key] = [sanitize_record(v) if isinstance(v, dict) else v for v in value]
-        elif isinstance(value, dict): new_record[key] = sanitize_record(value)
-        else: new_record[key] = value
+        # A ordem aqui é CRUCIAL: verificar List e Dict PRIMEIRO
+        if isinstance(value, list):
+            # Se for lista, limpa cada item recursivamente (se for dict) ou mantém
+            new_record[key] = [sanitize_record(v) if isinstance(v, dict) else v for v in value]
+        elif isinstance(value, dict):
+            new_record[key] = sanitize_record(value)
+        elif isinstance(value, (np.integer, np.int64)):
+            new_record[key] = int(value)
+        elif isinstance(value, (np.floating, np.float64)):
+            new_record[key] = float(value)
+        elif pd.isna(value):
+            new_record[key] = None
+        else:
+            new_record[key] = value
     return new_record
 
 def rodar_robo():
@@ -192,6 +235,8 @@ def rodar_robo():
     
     for league_id, league_name in LEAGUES.items():
         print(f"\n--- Processando: {league_name} ---", flush=True)
+        
+        coletar_e_salvar_tabela(league_id, league_name)
         
         df = coletar_campeonato(league_id, league_name)
         if df.empty: continue
@@ -221,10 +266,7 @@ def rodar_robo():
                         else: insight = "Jogo equilibrado."
                 except: pass
 
-            # --- CÁLCULO DO H2H (NOVO) ---
-            # Usa o próprio dataframe 'df_enriched' para achar jogos passados
             h2h_data = calcular_historico_h2h(df_enriched, row['home_team'], row['away_team'], row['date'])
-            # -----------------------------
 
             doc_ref = db.collection('games').document(row['id'])
             
@@ -240,7 +282,7 @@ def rodar_robo():
                 'date': row['date'].strftime("%d/%m %H:%M"),
                 'venue': str(row['venue']),
                 'probs': probs,
-                'h2h': h2h_data, # Campo Novo!
+                'h2h': h2h_data,
                 'stats': {
                     'homeAttack': row['home_attack'], 'homeDefense': row['home_defense'], 
                     'awayAttack': row['away_attack'], 'awayDefense': row['away_defense']
