@@ -85,7 +85,7 @@ def coletar_e_salvar_tabela(league_id, league_name):
                         'teamName': team_rank['team']['name'],
                         'teamLogo': team_rank['team']['logo'],
                         'points': team_rank['points'],
-                        'goalsDiff': team_rank['goalDifference'],
+                        'goalsDiff': team_rank.get('goalsDiff', 0), # CORREÇÃO AQUI: goalsDiff em vez de goalDifference
                         'played': team_rank['all']['played'],
                         'win': team_rank['all']['win'],
                         'draw': team_rank['all']['draw'],
