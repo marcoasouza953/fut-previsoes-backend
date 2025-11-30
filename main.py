@@ -11,7 +11,6 @@ import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score # Importante!
 
 # -------------------------------------------------------------------------
 # 1. CONFIGURAÇÕES
@@ -27,13 +26,16 @@ LEAGUES = {
     '2002': 'Bundesliga (ALE)'
 }
 
-SEASON_TARGET = datetime.datetime.now().year
+# --- CORREÇÃO: Forçar 2023 para garantir dados na API Grátis ---
+SEASON_TARGET = "2023" 
+# ---------------------------------------------------------------
 
-print(f"⚙️ ROBÔ IA (MONITOR DE PRECISÃO ATIVO)", flush=True)
+print(f"⚙️ ROBÔ INICIADO: Baixando dados de {SEASON_TARGET}", flush=True)
 
 # -------------------------------------------------------------------------
 # CONEXÃO FIREBASE
 # -------------------------------------------------------------------------
+print("1. Conectando ao Firebase...", flush=True)
 if not firebase_admin._apps:
     firebase_creds_str = os.environ.get("FIREBASE_CREDENTIALS")
     if firebase_creds_str:
@@ -45,22 +47,62 @@ if not firebase_admin._apps:
             cred = credentials.Certificate(local_key_path)
             firebase_admin.initialize_app(cred)
         else:
-            print("⚠️ AVISO: Sem credenciais.", flush=True)
+            print("⚠️ AVISO: Sem credenciais. O script não salvará nada.", flush=True)
 
 if firebase_admin._apps:
     db = firestore.client()
+    print("✅ Conectado ao banco de dados!", flush=True)
 
 # -------------------------------------------------------------------------
-# FUNÇÕES DE DADOS
+# LÓGICA DE DADOS
 # -------------------------------------------------------------------------
 
 def coletar_e_salvar_tabela(league_id, league_name):
-    # (Mesma lógica anterior, omitida para brevidade mas deve estar no código final)
-    # Se quiser, copie a função do script anterior.
-    pass 
+    print(f"   -> Baixando Classificação de {league_name}...", flush=True)
+    url = f"https://api.football-data.org/v4/competitions/{league_id}/standings"
+    headers = {'X-Auth-Token': API_KEY}
+    params = {"season": SEASON_TARGET}
+    
+    try:
+        resp = requests.get(url, headers=headers, params=params)
+        data = resp.json()
+        
+        if 'standings' not in data: 
+            print("      ⚠️ Tabela não encontrada.", flush=True)
+            return
+
+        standings_data = []
+        for group in data['standings']:
+            if group['type'] == 'TOTAL':
+                for team_rank in group['table']:
+                    standings_data.append({
+                        'rank': team_rank['position'],
+                        'teamName': team_rank['team']['name'],
+                        'teamLogo': team_rank['team'].get('crest', ''),
+                        'points': team_rank['points'],
+                        'goalsDiff': team_rank['goalDifference'],
+                        'played': team_rank['playedGames'],
+                        'win': team_rank['won'],
+                        'draw': team_rank['draw'],
+                        'lose': team_rank['lost'],
+                        'form': team_rank.get('form', ''),
+                        'group': group.get('group', 'Único')
+                    })
+        
+        if firebase_admin._apps and standings_data:
+            doc_ref = db.collection('standings').document(str(league_id))
+            doc_ref.set({
+                'leagueName': league_name,
+                'updatedAt': int(datetime.datetime.now().timestamp() * 1000),
+                'table': standings_data
+            })
+            print(f"      ✅ Tabela salva ({len(standings_data)} times).", flush=True)
+
+    except Exception as e:
+        print(f"      ❌ Erro tabela: {e}", flush=True)
 
 def coletar_campeonato(league_id, league_name):
-    print(f"   -> Baixando {league_name}...", flush=True)
+    print(f"   -> Baixando Jogos de {league_name}...", flush=True)
     url = f"https://api.football-data.org/v4/competitions/{league_id}/matches"
     headers = {'X-Auth-Token': API_KEY}
     params = {"season": SEASON_TARGET} 
@@ -68,6 +110,11 @@ def coletar_campeonato(league_id, league_name):
     try:
         resp = requests.get(url, headers=headers, params=params)
         data = resp.json()
+        
+        if "errors" in data and data["errors"]:
+            print(f"      ❌ Erro API: {data['errors']}", flush=True)
+            return pd.DataFrame()
+            
         jogos = []
         if 'matches' in data:
             for item in data['matches']:
@@ -105,9 +152,13 @@ def coletar_campeonato(league_id, league_name):
         if not df.empty:
             df['date'] = pd.to_datetime(df['date'])
             df = df.sort_values('date')
+            print(f"      ✅ {len(df)} jogos encontrados.", flush=True)
+        else:
+            print(f"      ⚠️ Nenhum jogo encontrado para {SEASON_TARGET}.", flush=True)
         return df
+
     except Exception as e:
-        print(f"      ❌ Erro API: {e}", flush=True)
+        print(f"      ❌ Erro de Conexão: {e}", flush=True)
         return pd.DataFrame()
 
 def calcular_historico_h2h(df_completo, time_a, time_b, data_limite):
@@ -122,7 +173,7 @@ def calcular_historico_h2h(df_completo, time_a, time_b, data_limite):
         if row['result'] == 1: winner = row['home_team']
         elif row['result'] == 2: winner = row['away_team']
         historico.append({
-            'date': row['date'].strftime("%d/%m"),
+            'date': row['date'].strftime("%d/%m/%y"),
             'home': row['home_team'], 'away': row['away_team'],
             'score': f"{int(row['home_goals'])} - {int(row['away_goals'])}",
             'winner': winner
@@ -179,12 +230,10 @@ def rodar_robo():
     count_saved = 0
     count_batch = 0
     
-    # Variáveis para Monitor de Precisão Global
-    total_acertos = 0
-    total_jogos_treino = 0
-    
     for league_id, league_name in LEAGUES.items():
         print(f"\n--- Processando: {league_name} ---", flush=True)
+        
+        coletar_e_salvar_tabela(league_id, league_name)
         
         df = coletar_campeonato(league_id, league_name)
         if df.empty: continue
@@ -193,22 +242,11 @@ def rodar_robo():
         
         df_treino = df_enriched[df_enriched['status'] == 'FT']
         model = None
-        
         if len(df_treino) > 10:
             X = df_treino[['diff_points', 'home_form_val', 'away_form_val', 'home_attack', 'home_defense', 'away_attack', 'away_defense']]
             y = df_treino['result'].astype(int)
-            
             model = RandomForestClassifier(n_estimators=50, random_state=42)
             model.fit(X, y)
-            
-            # --- CÁLCULO DE ACURÁCIA (AUTO-AVALIAÇÃO) ---
-            previsoes_treino = model.predict(X)
-            acertos = accuracy_score(y, previsoes_treino)
-            # Acumula para média global
-            total_acertos += acertos * len(y)
-            total_jogos_treino += len(y)
-            print(f"   🎯 Precisão nesta liga: {acertos*100:.1f}%")
-            # --------------------------------------------
 
         print(f"   Salvando {len(df_enriched)} jogos...", flush=True)
         
@@ -261,22 +299,7 @@ def rodar_robo():
                 print(f"   ... lote salvo.", flush=True)
 
     if count_batch > 0: batch.commit()
-    
-    # --- SALVAR ESTATÍSTICAS GLOBAIS DA IA ---
-    if total_jogos_treino > 0:
-        global_accuracy = (total_acertos / total_jogos_treino) * 100
-        print(f"\n🧠 PRECISÃO GLOBAL DA IA: {global_accuracy:.1f}%")
-        
-        # Salva num documento especial 'system/stats'
-        db.collection('system').document('stats').set({
-            'accuracy': float(global_accuracy),
-            'lastUpdate': datetime.datetime.now().strftime("%d/%m %H:%M"),
-            'totalGamesAnalyzed': int(total_jogos_treino)
-        })
-        print("✅ Estatísticas do sistema atualizadas.")
-    # ------------------------------------------
-
-    print(f"\n✅ FINALIZADO!", flush=True)
+    print(f"\n✅ SUCESSO! Banco de dados preenchido com {count_saved} jogos.", flush=True)
 
 if __name__ == "__main__":
     rodar_robo()
