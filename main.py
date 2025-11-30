@@ -13,24 +13,26 @@ from firebase_admin import firestore
 from sklearn.ensemble import RandomForestClassifier
 
 # -------------------------------------------------------------------------
-# 1. CONFIGURAÇÕES
+# 1. CONFIGURAÇÕES (API-FOOTBALL / API-SPORTS.IO)
 # -------------------------------------------------------------------------
 API_KEY = os.environ.get("FOOTBALL_API_KEY", "SUA_NOVA_API_KEY_AQUI") 
 
+# IDs Corretos da API-Football
 LEAGUES = {
-    '2013': 'Brasileirão Série A',
-    '2021': 'Premier League (ING)',
-    '2014': 'La Liga (ESP)',
-    '2001': 'Champions League',
-    '2019': 'Serie A (ITA)',
-    '2002': 'Bundesliga (ALE)'
+    '71': 'Brasileirão Série A',
+    '39': 'Premier League (ING)',
+    '140': 'La Liga (ESP)',
+    '2': 'Champions League',
+    '135': 'Serie A (ITA)',
+    '78': 'Bundesliga (ALE)',
+    '13': 'Copa Libertadores',
+    '11': 'Copa Sul-Americana'
 }
 
-# --- CORREÇÃO: Forçar 2023 para garantir dados na API Grátis ---
+# Forçar 2023 para garantir dados completos na conta Free
 SEASON_TARGET = "2023" 
-# ---------------------------------------------------------------
 
-print(f"⚙️ ROBÔ INICIADO: Baixando dados de {SEASON_TARGET}", flush=True)
+print(f"⚙️ ROBÔ API-FOOTBALL INICIADO: Baixando dados de {SEASON_TARGET}", flush=True)
 
 # -------------------------------------------------------------------------
 # CONEXÃO FIREBASE
@@ -54,39 +56,42 @@ if firebase_admin._apps:
     print("✅ Conectado ao banco de dados!", flush=True)
 
 # -------------------------------------------------------------------------
-# LÓGICA DE DADOS
+# LÓGICA DE DADOS (API-FOOTBALL)
 # -------------------------------------------------------------------------
 
 def coletar_e_salvar_tabela(league_id, league_name):
     print(f"   -> Baixando Classificação de {league_name}...", flush=True)
-    url = f"https://api.football-data.org/v4/competitions/{league_id}/standings"
-    headers = {'X-Auth-Token': API_KEY}
-    params = {"season": SEASON_TARGET}
+    url = "https://v3.football.api-sports.io/standings"
+    headers = {'x-apisports-key': API_KEY}
+    params = {"league": league_id, "season": SEASON_TARGET}
     
     try:
         resp = requests.get(url, headers=headers, params=params)
         data = resp.json()
         
-        if 'standings' not in data: 
+        if not data.get('response'):
             print("      ⚠️ Tabela não encontrada.", flush=True)
             return
 
         standings_data = []
-        for group in data['standings']:
-            if group['type'] == 'TOTAL':
-                for team_rank in group['table']:
+        # A estrutura da API-Football é: response[0]['league']['standings'][0] (lista de times)
+        # Para copas, standings pode ter varias listas (grupos)
+        
+        for league_data in data['response']:
+            for group in league_data['league']['standings']:
+                for team_rank in group:
                     standings_data.append({
-                        'rank': team_rank['position'],
+                        'rank': team_rank['rank'],
                         'teamName': team_rank['team']['name'],
-                        'teamLogo': team_rank['team'].get('crest', ''),
+                        'teamLogo': team_rank['team']['logo'],
                         'points': team_rank['points'],
-                        'goalsDiff': team_rank['goalDifference'],
-                        'played': team_rank['playedGames'],
-                        'win': team_rank['won'],
-                        'draw': team_rank['draw'],
-                        'lose': team_rank['lost'],
+                        'goalsDiff': team_rank['goalsDiff'],
+                        'played': team_rank['all']['played'],
+                        'win': team_rank['all']['win'],
+                        'draw': team_rank['all']['draw'],
+                        'lose': team_rank['all']['lose'],
                         'form': team_rank.get('form', ''),
-                        'group': group.get('group', 'Único')
+                        'group': team_rank.get('group', 'Único')
                     })
         
         if firebase_admin._apps and standings_data:
@@ -103,9 +108,9 @@ def coletar_e_salvar_tabela(league_id, league_name):
 
 def coletar_campeonato(league_id, league_name):
     print(f"   -> Baixando Jogos de {league_name}...", flush=True)
-    url = f"https://api.football-data.org/v4/competitions/{league_id}/matches"
-    headers = {'X-Auth-Token': API_KEY}
-    params = {"season": SEASON_TARGET} 
+    url = "https://v3.football.api-sports.io/fixtures"
+    headers = {'x-apisports-key': API_KEY}
+    params = {"league": league_id, "season": SEASON_TARGET} 
     
     try:
         resp = requests.get(url, headers=headers, params=params)
@@ -116,35 +121,54 @@ def coletar_campeonato(league_id, league_name):
             return pd.DataFrame()
             
         jogos = []
-        if 'matches' in data:
-            for item in data['matches']:
-                rodada_num = item.get('matchday', 0)
-                home = item['homeTeam']['name']
-                away = item['awayTeam']['name']
-                home_logo = item['homeTeam'].get('crest', '')
-                away_logo = item['awayTeam'].get('crest', '')
-                score_h = item['score']['fullTime']['home']
-                score_a = item['score']['fullTime']['away']
-                status_api = item['status']
+        if 'response' in data:
+            for item in data['response']:
+                rodada_str = item['league']['round']
+                # Tenta extrair número
+                numeros = re.findall(r'\d+', str(rodada_str))
+                rodada_num = int(numeros[0]) if numeros else 0
                 
-                status = 'NS'
+                # Ajuste para fases finais
+                if "Final" in rodada_str: rodada_num = 50
+                if "Semi" in rodada_str: rodada_num = 49
+                if "Quarter" in rodada_str: rodada_num = 48
+                if "16" in rodada_str: rodada_num = 47
+
+                home = item['goals']['home']
+                away = item['goals']['away']
+                status_short = item['fixture']['status']['short']
+                
+                # Na API-Football, os logos estão em item['teams']['...']['logo']
+                home_logo = item['teams']['home']['logo']
+                away_logo = item['teams']['away']['logo']
+                
                 result = None
-                if status_api == 'FINISHED':
-                    status = 'FT'
-                    if score_h is not None and score_a is not None:
-                        result = 1 if score_h > score_a else (2 if score_a > score_h else 0)
+                status = 'NS' # Default Not Started
                 
+                # Se jogo terminou (FT, AET, PEN)
+                if status_short in ['FT', 'AET', 'PEN']:
+                    status = 'FT'
+                    if home is not None and away is not None:
+                        result = 1 if home > away else (2 if away > home else 0)
+                
+                # Se jogo está adiado/cancelado
+                if status_short in ['PST', 'CANC', 'ABD']:
+                    status = 'PST'
+
                 jogos.append({
-                    'id': str(item['id']),
+                    'id': str(item['fixture']['id']),
                     'league_id': league_id,
-                    'date': item['utcDate'],
-                    'home_team': home, 'away_team': away,
-                    'home_logo': home_logo, 'away_logo': away_logo,
-                    'home_goals': score_h, 'away_goals': score_a,
+                    'date': item['fixture']['date'],
+                    'home_team': item['teams']['home']['name'],
+                    'away_team': item['teams']['away']['name'],
+                    'home_logo': home_logo,
+                    'away_logo': away_logo,
+                    'home_goals': home,
+                    'away_goals': away,
                     'result': result,
-                    'venue': "Estádio",
+                    'venue': item['fixture']['venue']['name'] if item['fixture']['venue']['name'] else "Estádio",
                     'round': rodada_num,
-                    'round_label': f"Rodada {rodada_num}",
+                    'round_label': rodada_str, # Ex: "Regular Season - 1"
                     'status': status
                 })
         
@@ -172,10 +196,14 @@ def calcular_historico_h2h(df_completo, time_a, time_b, data_limite):
         winner = 'Empate'
         if row['result'] == 1: winner = row['home_team']
         elif row['result'] == 2: winner = row['away_team']
+        
+        hg = int(row['home_goals']) if pd.notna(row['home_goals']) else 0
+        ag = int(row['away_goals']) if pd.notna(row['away_goals']) else 0
+        
         historico.append({
             'date': row['date'].strftime("%d/%m/%y"),
             'home': row['home_team'], 'away': row['away_team'],
-            'score': f"{int(row['home_goals'])} - {int(row['away_goals'])}",
+            'score': f"{hg} - {ag}",
             'winner': winner
         })
     return historico
@@ -279,7 +307,7 @@ def rodar_robo():
                 'homeLogo': str(row['home_logo']), 'awayLogo': str(row['away_logo']),
                 'homeScore': row['home_goals'], 'awayScore': row['away_goals'],
                 'date': row['date'].strftime("%d/%m %H:%M"),
-                'venue': "Estádio",
+                'venue': str(row['venue']),
                 'probs': probs,
                 'h2h': h2h_data,
                 'stats': {
