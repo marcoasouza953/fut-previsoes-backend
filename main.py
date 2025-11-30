@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import datetime
 import re
+import time  # <--- Importante para as pausas
 import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore
@@ -26,11 +27,10 @@ LEAGUES = {
     '11': 'Copa Sul-Americana'
 }
 
-# --- CORREÇÃO: Forçar 2023 para garantir dados (Máquina do Tempo) ---
+# Forçar 2023 para garantir dados na conta Free
 SEASON_TARGET = "2023" 
-# --------------------------------------------------------------------
 
-print(f"⚙️ ROBÔ INICIADO: Baixando temporada histórica {SEASON_TARGET} para preencher o App.", flush=True)
+print(f"⚙️ ROBÔ INICIADO: Baixando temporada histórica {SEASON_TARGET}", flush=True)
 
 # -------------------------------------------------------------------------
 # CONEXÃO FIREBASE
@@ -67,8 +67,13 @@ def coletar_e_salvar_tabela(league_id, league_name):
         resp = requests.get(url, headers=headers, params=params)
         data = resp.json()
         
+        # Tratamento de erro de limite dentro da função
+        if "errors" in data and data["errors"]:
+            print(f"      ❌ Erro API Tabela: {data['errors']}", flush=True)
+            return
+
         if not data.get('response'):
-            print("      ⚠️ Tabela não encontrada.", flush=True)
+            print("      ⚠️ Tabela não encontrada (Pode ser início de época).", flush=True)
             return
 
         standings_data = []
@@ -80,7 +85,7 @@ def coletar_e_salvar_tabela(league_id, league_name):
                         'teamName': team_rank['team']['name'],
                         'teamLogo': team_rank['team']['logo'],
                         'points': team_rank['points'],
-                        'goalsDiff': team_rank['goalsDiff'],
+                        'goalsDiff': team_rank['goalDifference'],
                         'played': team_rank['all']['played'],
                         'win': team_rank['all']['win'],
                         'draw': team_rank['all']['draw'],
@@ -96,7 +101,7 @@ def coletar_e_salvar_tabela(league_id, league_name):
                 'updatedAt': int(datetime.datetime.now().timestamp() * 1000),
                 'table': standings_data
             })
-            print(f"      ✅ Tabela salva ({len(standings_data)} times).", flush=True)
+            print(f"      ✅ Tabela salva.", flush=True)
 
     except Exception as e:
         print(f"      ❌ Erro tabela: {e}", flush=True)
@@ -112,7 +117,7 @@ def coletar_campeonato(league_id, league_name):
         data = resp.json()
         
         if "errors" in data and data["errors"]:
-            print(f"      ❌ Erro API: {data['errors']}", flush=True)
+            print(f"      ❌ Erro API Jogos: {data['errors']}", flush=True)
             return pd.DataFrame()
             
         jogos = []
@@ -237,34 +242,29 @@ def rodar_robo():
     count_saved = 0
     count_batch = 0
     
-    # Variáveis para Monitor de Precisão
-    total_acertos = 0
-    total_jogos_treino = 0
-
     for league_id, league_name in LEAGUES.items():
         print(f"\n--- Processando: {league_name} ---", flush=True)
         
+        # PAUSA ESTRATÉGICA PARA EVITAR BLOQUEIO (NOVO!)
+        # 2 requisições por liga (Tabela + Jogos) * 6 ligas = 12 requests.
+        # Limite é 10/minuto. Pausa de 7s garante segurança total.
+        time.sleep(7) 
+        
         coletar_e_salvar_tabela(league_id, league_name)
         
+        time.sleep(1) # Pausa leve entre tabela e jogos
         df = coletar_campeonato(league_id, league_name)
+        
         if df.empty: continue
         
         df_enriched = engenharia_de_features(df)
         df_treino = df_enriched.dropna(subset=['result'])
-        
         model = None
         if len(df_treino) > 10:
             X = df_treino[['diff_points', 'home_form_val', 'away_form_val', 'home_attack', 'home_defense', 'away_attack', 'away_defense']]
             y = df_treino['result'].astype(int)
             model = RandomForestClassifier(n_estimators=50, random_state=42)
             model.fit(X, y)
-            
-            # Calcula precisão
-            preds = model.predict(X)
-            from sklearn.metrics import accuracy_score
-            acc = accuracy_score(y, preds)
-            total_acertos += acc * len(y)
-            total_jogos_treino += len(y)
 
         print(f"   Salvando {len(df_enriched)} jogos...", flush=True)
         
@@ -287,9 +287,6 @@ def rodar_robo():
 
             doc_ref = db.collection('games').document(row['id'])
             
-            # Status final
-            st = row['status']
-            
             dados_raw = {
                 'id': row['id'],
                 'leagueId': league_id,
@@ -311,7 +308,7 @@ def rodar_robo():
                 },
                 'insight': insight,
                 'timestamp': int(row['date'].timestamp() * 1000),
-                'status': st
+                'status': row['status']
             }
             batch.set(doc_ref, sanitize_record(dados_raw))
             count_saved += 1
@@ -321,19 +318,7 @@ def rodar_robo():
                 print(f"   ... lote salvo.", flush=True)
 
     if count_batch > 0: batch.commit()
-    
-    # Salva precisão global
-    if total_jogos_treino > 0:
-        final_acc = (total_acertos / total_jogos_treino) * 100
-        db.collection('system').document('stats').set({
-            'accuracy': float(final_acc),
-            'lastUpdate': datetime.datetime.now().strftime("%d/%m %H:%M"),
-            'totalGamesAnalyzed': int(total_jogos_treino),
-            'isMock': False
-        })
-        print(f"   🎯 Precisão Global Atualizada: {final_acc:.1f}%")
-
-    print(f"\n✅ SUCESSO! Banco de dados preenchido com {count_saved} jogos de {SEASON_TARGET}.", flush=True)
+    print(f"\n✅ FINALIZADO! Jogos e Tabelas atualizados.", flush=True)
 
 if __name__ == "__main__":
     rodar_robo()
