@@ -7,14 +7,14 @@ import pandas as pd
 import numpy as np
 import datetime
 import re
-import time  # <--- Importante para as pausas
+import time
 import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore
 from sklearn.ensemble import RandomForestClassifier
 
 # -------------------------------------------------------------------------
-# 1. CONFIGURAÇÕES (API-FOOTBALL)
+# 1. CONFIGURAÇÕES
 # -------------------------------------------------------------------------
 API_KEY = os.environ.get("FOOTBALL_API_KEY", "SUA_NOVA_API_KEY_AQUI") 
 
@@ -30,7 +30,7 @@ LEAGUES = {
 # Forçar 2023 para garantir dados na conta Free
 SEASON_TARGET = "2023" 
 
-print(f"⚙️ ROBÔ INICIADO: Baixando temporada histórica {SEASON_TARGET}", flush=True)
+print(f"⚙️ ROBÔ PREVISÃO DE GOLOS: Baixando dados de {SEASON_TARGET}", flush=True)
 
 # -------------------------------------------------------------------------
 # CONEXÃO FIREBASE
@@ -67,13 +67,8 @@ def coletar_e_salvar_tabela(league_id, league_name):
         resp = requests.get(url, headers=headers, params=params)
         data = resp.json()
         
-        # Tratamento de erro de limite dentro da função
-        if "errors" in data and data["errors"]:
-            print(f"      ❌ Erro API Tabela: {data['errors']}", flush=True)
-            return
-
         if not data.get('response'):
-            print("      ⚠️ Tabela não encontrada (Pode ser início de época).", flush=True)
+            print("      ⚠️ Tabela não encontrada.", flush=True)
             return
 
         standings_data = []
@@ -85,7 +80,7 @@ def coletar_e_salvar_tabela(league_id, league_name):
                         'teamName': team_rank['team']['name'],
                         'teamLogo': team_rank['team']['logo'],
                         'points': team_rank['points'],
-                        'goalsDiff': team_rank.get('goalsDiff', 0), # CORREÇÃO AQUI: goalsDiff em vez de goalDifference
+                        'goalsDiff': team_rank['goalsDiff'],
                         'played': team_rank['all']['played'],
                         'win': team_rank['all']['win'],
                         'draw': team_rank['all']['draw'],
@@ -117,7 +112,7 @@ def coletar_campeonato(league_id, league_name):
         data = resp.json()
         
         if "errors" in data and data["errors"]:
-            print(f"      ❌ Erro API Jogos: {data['errors']}", flush=True)
+            print(f"      ❌ Erro API: {data['errors']}", flush=True)
             return pd.DataFrame()
             
         jogos = []
@@ -140,8 +135,13 @@ def coletar_campeonato(league_id, league_name):
                 away_logo = item['teams']['away']['logo']
                 
                 result = None
+                # Para previsão de gols: 1 = Over 2.5, 0 = Under 2.5
+                over_25 = None
+                
                 if status in ['FT', 'AET', 'PEN'] and home is not None:
                     result = 1 if home > away else (2 if away > home else 0)
+                    total_goals = int(home) + int(away)
+                    over_25 = 1 if total_goals > 2.5 else 0
                 
                 jogos.append({
                     'id': str(item['fixture']['id']),
@@ -154,6 +154,7 @@ def coletar_campeonato(league_id, league_name):
                     'home_goals': home,
                     'away_goals': away,
                     'result': result,
+                    'over_25': over_25, # NOVO ALVO
                     'venue': item['fixture']['venue']['name'] if item['fixture']['venue']['name'] else "Estádio",
                     'round': rodada_num,
                     'round_label': rodada_str,
@@ -245,41 +246,59 @@ def rodar_robo():
     for league_id, league_name in LEAGUES.items():
         print(f"\n--- Processando: {league_name} ---", flush=True)
         
-        # PAUSA ESTRATÉGICA PARA EVITAR BLOQUEIO (NOVO!)
-        # 2 requisições por liga (Tabela + Jogos) * 6 ligas = 12 requests.
-        # Limite é 10/minuto. Pausa de 7s garante segurança total.
+        # Pausa estratégica para evitar rate limit
         time.sleep(7) 
         
         coletar_e_salvar_tabela(league_id, league_name)
         
-        time.sleep(1) # Pausa leve entre tabela e jogos
+        time.sleep(1) 
         df = coletar_campeonato(league_id, league_name)
         
         if df.empty: continue
         
         df_enriched = engenharia_de_features(df)
         df_treino = df_enriched.dropna(subset=['result'])
-        model = None
+        
+        model_match = None
+        model_goals = None
+        
         if len(df_treino) > 10:
             X = df_treino[['diff_points', 'home_form_val', 'away_form_val', 'home_attack', 'home_defense', 'away_attack', 'away_defense']]
-            y = df_treino['result'].astype(int)
-            model = RandomForestClassifier(n_estimators=50, random_state=42)
-            model.fit(X, y)
+            
+            # IA 1: Previsão de Vencedor
+            y_match = df_treino['result'].astype(int)
+            model_match = RandomForestClassifier(n_estimators=50, random_state=42)
+            model_match.fit(X, y_match)
+            
+            # IA 2: Previsão de Golos (Over 2.5)
+            # Criamos target: 1 se > 2.5, 0 se <= 2.5
+            y_goals = df_treino['over_25'].astype(int)
+            model_goals = RandomForestClassifier(n_estimators=50, random_state=42)
+            model_goals.fit(X, y_goals)
 
         print(f"   Salvando {len(df_enriched)} jogos...", flush=True)
         
         for index, row in df_enriched.iterrows():
             probs = {'home': 33, 'draw': 34, 'away': 33}
+            probs_goals = {'over': 50, 'under': 50} # Padrão
             insight = "Aguardando."
             
-            if model:
+            if model_match and model_goals:
                 try:
                     feats = [[row['diff_points'], row['home_form_val'], row['away_form_val'], row['home_attack'], row['home_defense'], row['away_attack'], row['away_defense']]]
                     if not np.isnan(feats).any():
-                        p = model.predict_proba(feats)[0]
-                        probs = {'home': int(p[1]*100), 'draw': int(p[0]*100), 'away': int(p[2]*100)}
-                        if p[1] > 0.6: insight = f"{row['home_team']} favorito."
-                        elif p[2] > 0.6: insight = f"{row['away_team']} favorito."
+                        # Vencedor
+                        p_match = model_match.predict_proba(feats)[0]
+                        probs = {'home': int(p_match[1]*100), 'draw': int(p_match[0]*100), 'away': int(p_match[2]*100)}
+                        
+                        # Golos
+                        p_goals = model_goals.predict_proba(feats)[0]
+                        # p_goals[1] é probabilidade de Over 2.5
+                        probs_goals = {'under': int(p_goals[0]*100), 'over': int(p_goals[1]*100)}
+                        
+                        if p_match[1] > 0.6: insight = f"{row['home_team']} favorito."
+                        elif p_match[2] > 0.6: insight = f"{row['away_team']} favorito."
+                        elif p_goals[1] > 0.65: insight = "Expectativa de muitos gols (Over 2.5)."
                         else: insight = "Jogo equilibrado."
                 except: pass
 
@@ -300,6 +319,7 @@ def rodar_robo():
                 'date': row['date'].strftime("%d/%m %H:%M"),
                 'venue': str(row['venue']),
                 'probs': probs,
+                'probs_goals': probs_goals, # Campo novo!
                 'h2h': h2h_data,
                 'stats': {
                     'homeAttack': row['home_attack'], 'homeDefense': row['home_defense'], 
@@ -318,7 +338,7 @@ def rodar_robo():
                 print(f"   ... lote salvo.", flush=True)
 
     if count_batch > 0: batch.commit()
-    print(f"\n✅ FINALIZADO! Jogos e Tabelas atualizados.", flush=True)
+    print(f"\n✅ FINALIZADO! Jogos com Previsão de Golos atualizados.", flush=True)
 
 if __name__ == "__main__":
     rodar_robo()
